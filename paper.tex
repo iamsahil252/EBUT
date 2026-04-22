@@ -680,6 +680,16 @@ C_s = C_{s,\mathsf{shift}} + h_5 = s \cdot h_5 + r_s \cdot h_0.
 \]
 All remaining Hidden-mode bridge equations use the derived $C_s$, while the second BEQ proof is run only on $C_{s,\mathsf{shift}}$. Thus the lower bound $s \ge 1$ is enforced with zero extra proof bytes and only one additional local $\mathbb{G}_1$ addition on the verifier. Here $h_5$ is an independent generator reserved for hidden spend amounts. In the current reference implementation, this role is instantiated by the pre-generated base $h_3$, which is not otherwise used in spend-mode equations; all Hidden-mode checks therefore use a generator independent from the balance base $h_4$.
 
+\begin{remark}[Generator reuse: $h_3$ in refresh vs.\ $h_5 = h_3$ in Hidden spend]
+In the reference implementation $h_5$ is set equal to $h_3$, the generator used for $E_{\mathsf{max}}$ commitments in the \emph{refresh} proof.  This is safe under the following reasoning:
+\begin{enumerate}[leftmargin=*]
+  \item The NUMS hypothesis (Assumption 2.4) guarantees that no PPT algorithm can compute a non-trivial DL relation among any of $h_0,\ldots,h_5$.  In particular, the discrete-log relation between $h_3$ (in refresh context) and $h_3 = h_5$ (in spend context) is trivially $1$, but this relation is already public; it does not introduce a new attack surface.
+  \item The Fiat--Shamir challenges for the refresh proof (domain ``\texttt{b"Refresh"}'') and the Hidden-mode spend proof (domain ``\texttt{b"Spend"}'') are computed over disjoint protocol transcripts, so no prover can mix commitments across phases to exploit the shared generator.
+  \item The verification keys $\mathsf{pk}_{\mathsf{master}}$ (refresh) and $\mathsf{pk}_{\mathsf{daily}}$ (spend) are distinct and bound into the context hash $H_{\mathsf{ctx}}$, which appears at the head of every challenge.
+\end{enumerate}
+Despite this safety argument, we \textbf{recommend} that production deployments derive a dedicated $h_5$ using a distinct hash-to-curve input (e.g., $h_5 = \mathcal{H}_{\mathbb{G}_1}(\text{``EBUT:Generator:''}\,\|\,5)$ with a tag strictly different from any refresh-context generator) rather than reusing $h_3$.  This eliminates any residual cross-phase concern and simplifies future security audits.
+\end{remark}
+
 \paragraph{Client-Side Computation.}
 Hidden mode uses the same deterministic $(\eta, k^*, r^*)$ derivation and the same counter $i$ as Exact mode. The client computes $m = c_{\mathsf{bal}} - s$, sets $s_{\mathsf{shift}} = s-1$, derives $r_s \in \mathbb{Z}_q$ and the remaining proof randomizers from $(k_{\mathsf{sub}}, T_{\mathsf{issue}}, i)$ via domain-separated hashes, and forms the refund commitment
 \[
@@ -1220,7 +1230,15 @@ We move through hybrids $\mathsf{H}_0,\dots,\mathsf{H}_5$, where $\Pr[S_{\mathsf
 \[
 N_T = k_{\mathsf{sub}}^{(b)} H_T
 \]
-by a uniformly random element of $\mathbb{G}_1$, while leaving the simulated proof machinery from $\mathsf{H}_2$ unchanged. Distinguishing $\mathsf{H}_3$ from $\mathsf{H}_2$ exactly distinguishes a Diffie--Hellman product from random in $\mathbb{G}_1$: given $(g_1,g_1^a,g_1^b,C)$, embed the two challenge clients' master secrets as $a$ and $b$, set $H_T=g_1$, and program the challenge nullifier as $N_T=C$. If $C=g_1^{ab}$ the transcript is real; if $C$ is random, the transcript is distributed as in $\mathsf{H}_3$. Therefore
+by a uniformly random element of $\mathbb{G}_1$, while leaving the simulated proof machinery from $\mathsf{H}_2$ unchanged.
+
+We reduce distinguishing $\mathsf{H}_3$ from $\mathsf{H}_2$ to the DDH problem in $\mathbb{G}_1$ (i.e., the SXDH assumption restricted to $\mathbb{G}_1$).  Given a DDH challenge $(g_1,\, P_a = g_1^a,\, P_b = g_1^b,\, C)$, the reduction proceeds as follows.
+\begin{enumerate}[leftmargin=*]
+\item In the UNLINK game's challenge refresh query for epoch $T$, the reduction \emph{programs} the random oracle so that $H_T = P_a = g_1^a$ (i.e., on input $T$ the RO returns $P_a$ rather than a freshly hashed value).
+\item The two challenge clients' master secrets are embedded as $k_{\mathsf{sub}}^{(0)} = b$ and $k_{\mathsf{sub}}^{(1)} = b$ (or vice versa; only client $b$'s secret is used for the challenge nullifier, so it suffices to set the \emph{challenge client}'s master secret to $b$, giving $N_T^* = b \cdot H_T = b \cdot g_1^a = g_1^{ab}$).
+\item The reduction sets $N_T = C$ as the challenge nullifier.  If $C = g_1^{ab}$ then $N_T = k_{\mathsf{sub}}^{(b)} H_T$ exactly as in $\mathsf{H}_2$; if $C$ is uniformly random in $\mathbb{G}_1$ the distribution of $N_T$ matches $\mathsf{H}_3$.
+\end{enumerate}
+The reduction succeeds because the random-oracle programming is consistent: on any epoch query $T' \ne T$ the RO returns a fresh independent hash, and $H_{T'}$ is therefore unrelated to $P_a$.  Therefore
 \[
 |\Pr[S_{\mathsf{H}_3}] - \Pr[S_{\mathsf{H}_2}]| \le \advantage{SXDH}(\mathcal{B}_{\text{SXDH}}).
 \]
@@ -1242,19 +1260,24 @@ The EBUT construction satisfies rate-limit soundness under the Discrete Logarith
 \[
 \advantage{RLS}(\mathcal{A}) \le \advantage{DL}(\mathcal{B}_{\text{DL}}) + \frac{q_{\text{RO}}^2}{2q} + \frac{q_{\mathsf{refresh}}}{q} + \frac{1}{2^{128}} + \negl(\lambda).
 \]
+The $\advantage{DL}$ term arises exclusively from Case~2 (overspending), via the BEQ knowledge extractor (Theorem~\ref{thm:beq-knowledge}). Case~1 (duplicate daily tokens) requires only the algebraic refresh extractor and contributes only the Forking Lemma cost $q_{\mathsf{refresh}}/q$.
 \end{theorem}
 \begin{proof}
 We again separate the two winning conditions from Game~3.
 
 \paragraph{Case 1: two daily tokens from one master secret in one epoch.}
-Take any accepted refresh tuple $(N_T,\pi_{\mathsf{refresh}},\mathcal{T}_{\mathsf{daily}})$ output by the adversary. By Lemma~\ref{lem:refresh-extractor}, except with the already-accounted-for outer knowledge error and BEQ failure probability, extraction yields a master secret $k_{\mathsf{sub}}$ satisfying
+Take any accepted refresh tuple $(N_T,\pi_{\mathsf{refresh}},\mathcal{T}_{\mathsf{daily}})$ output by the adversary. By Lemma~\ref{lem:refresh-extractor}, except with the already-accounted-for outer knowledge error and BEQ failure probability, the \emph{outer} Sigma extractor—which is purely algebraic (it only divides response differences by $\Delta c$ in $\mathbb{Z}_q$, with no discrete-log computation)—yields a master secret $k_{\mathsf{sub}}$ satisfying
 \[
 N_T = k_{\mathsf{sub}} H_T.
 \]
-Therefore, for a fixed epoch $T$ and fixed master secret $k_{\mathsf{sub}}$, the nullifier is uniquely determined. If two valid refresh tuples for the same epoch came from the same master secret, they would necessarily contain the same nullifier, contradicting the game's requirement that the successful adversary output distinct nullifiers. Thus
+Therefore, for a fixed epoch $T$ and fixed master secret $k_{\mathsf{sub}}$, the nullifier is uniquely determined: since $H_T \ne 1_{\mathbb{G}_1}$ (public derivation, Assumption 2.4) and $\mathbb{G}_1$ has prime order, $k \cdot H_T = k' \cdot H_T$ implies $k = k'$. If two valid refresh tuples for the same epoch came from the same master secret, they would necessarily carry the same nullifier, contradicting the game's requirement that the adversary output distinct nullifiers.
+
+\begin{remark}
+No discrete-logarithm reduction is needed for Case~1.  The argument uses only the prime-order group law and the purely algebraic refresh extractor (Lemma~\ref{lem:refresh-extractor}).  Consequently the DL assumption contributes \emph{solely} through Case~2 (overspending via the BEQ extractor).  This yields the tighter bound
 \[
-\Pr[\text{Case 1}] \le \advantage{DL}(\mathcal{B}_{\text{DL}}^{(1)}) + \frac{q_{\mathsf{refresh}}}{q} + \frac{1}{2^{128}} + \negl(\lambda).
+\Pr[\text{Case 1}] \le \frac{q_{\mathsf{refresh}}}{q} + \frac{1}{2^{128}} + \negl(\lambda).
 \]
+\end{remark}
 
 \paragraph{Case 2: overspending within an epoch.}
 Fix one accepted daily token and consider the entire accepted spend chain that descends from it. Let $b_0=c_{\mathsf{max}}$ be the initial balance encoded in that token. For each accepted spend $j \in \{1,\dots,t\}$, Lemma~\ref{lem:spend-extractor} yields a spend amount $s_j$ and a refund balance $b_j \ge 0$ such that the current token balance satisfies
@@ -1904,19 +1927,26 @@ The reference implementation makes several choices that differ from or are
 more conservative than the presentation in earlier sections.  Where they
 conflict, the implementation is the authoritative reference.
 
+\textbf{Interoperability notice.}  Items marked \textbf{(N)} below are
+\emph{normative}: any independent implementation that does not match them
+byte-for-byte will produce proofs that the reference verifier rejects and
+vice versa.  Items marked \textbf{(I)} are informational; they record
+design rationale but do not affect interoperability at the wire-format level.
+
 \begin{itemize}[leftmargin=*]
 
-\item \textbf{Domain separation strings.}
+\item \textbf{(N) Domain separation strings.}
   Section~4.1.1 used \texttt{"EBUT:Generator:"} and \texttt{"EBUT:Context"}
   as example DSTs.  The actual implementation uses \texttt{"ACT:BBS:"} for
   generator derivation, \texttt{"ACT:Context"} for $H_{\mathsf{ctx}}$,
   \texttt{"ACT:Epoch:"} for the epoch base point, and
   \texttt{"ACT:BEQ:Challenge"} for the BEQ Fiat--Shamir challenge.  The
   Fiat--Shamir domain labels within the main proof are \texttt{b"Refresh"}
-  and \texttt{b"Spend"}.  Any interoperable implementation must match these
-  strings exactly.
+  and \texttt{b"Spend"}.  \textbf{Any interoperable implementation must
+  match these strings exactly.}  Using the example strings from Section~4
+  will produce incompatible proofs.
 
-\item \textbf{Epoch integer encoding: little-endian (not big-endian).}
+\item \textbf{(N) Epoch integer encoding: little-endian (not big-endian).}
   The epoch $T$ is encoded as a 32-bit \emph{little-endian} integer in the
   implementation (matching the reference code's \texttt{t.to\_le\_bytes()}
   convention for epochs).  This is a special-case encoding for $T$ and does
@@ -1925,7 +1955,7 @@ conflict, the implementation is the authoritative reference.
   computing $H_T = \mathcal{H}_{\mathbb{G}_1}(\text{"ACT:Epoch:"} \parallel
   T_{\text{LE}})$.
 
-\item \textbf{SpendProof includes $T_{\mathsf{scale},R}$ and $T_{\mathsf{refund}}$.}
+\item \textbf{(N) SpendProof includes $T_{\mathsf{scale},R}$ and $T_{\mathsf{refund}}$.}
   Although the Exact-mode soundness argument can derive the refund bridge from
   the total bridge and the public relation $C_{\mathsf{total}} = K' + s h_4$,
   the canonical wire format retains $(T_{\mathsf{scale},R},
@@ -1934,7 +1964,7 @@ conflict, the implementation is the authoritative reference.
   keeps the Exact and Hidden encodings closer and simplifies verifier code.
   Hidden mode requires the pair outright.
 
-\item \textbf{Fiat--Shamir hash width.}
+\item \textbf{(I) Fiat--Shamir hash width.}
   Earlier drafts stated that \texttt{SHA-256~mod~q} is ``prohibited.''  For
   the BLS12-381 scalar field ($q$ a 255-bit prime), the bias from a 256-bit
   SHA-256 output reduced modulo $q$ is $(2^{256} \bmod q)/q \approx 2^{-255}$,
@@ -1942,7 +1972,7 @@ conflict, the implementation is the authoritative reference.
   with repeated-subtraction mod-$q$ reduction and is sound.  The former
   prohibition is replaced by the clarification in Section~7.5.
 
-\item \textbf{BEQ wire format.}
+\item \textbf{(N) BEQ wire format.}
   The specification in Section~5.2 lists the canonical tuple
   \[
   \pi_{\text{BEQ}} = (C_{25519}, R_{\text{BLS}}, R_{25519}, z, z_{\text{BLS}}, z_{25519}, \pi_{\text{range}}).
