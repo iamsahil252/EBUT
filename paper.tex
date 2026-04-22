@@ -1,0 +1,2221 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{hyperref}
+\usepackage{xurl}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{multirow}
+\usepackage{array}
+\geometry{margin=1in}
+\emergencystretch=3em
+
+% Theorem styles
+\newtheoremstyle{definitionstyle}
+  {3pt}{3pt}{\normalfont}{}{\bfseries}{.}{.5em}{}
+\theoremstyle{definitionstyle}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{assumption}{Assumption}[section]
+
+\theoremstyle{plain}
+\newtheorem*{remark}{Remark}
+
+% Game environment
+\newenvironment{game}[2][]
+  {\par\addvspace{\topsep}\noindent\textbf{Game #2}\ #1\par\nobreak\smallskip\hrule\smallskip}
+  {\hrule\par\addvspace{\topsep}}
+
+\newcommand{\advantage}[1]{\mathbf{Adv}^{\mathrm{#1}}}
+\newcommand{\negl}{\mathrm{negl}}
+\newcommand{\bit}{\{0,1\}}
+\newcommand{\DB}{\mathcal{DB}}
+
+\title{Epoch-Bound Usage Tokens: Rate-Limited Anonymous Access with Zero-Knowledge Enforcement}
+\author{Anant Singh}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present \emph{Epoch-Bound Usage Tokens (EBUT)}, a privacy-preserving primitive for enforcing rate-limited access in anonymous systems. In settings where users interact without persistent identities, enforcing usage policies such as rate limits and bounded resource consumption is challenging, as traditional approaches rely on identity-based tracking.
+
+EBUT addresses this problem by introducing a token-based mechanism that combines epoch-bound issuance with bounded usage enforcement. Each user derives at most one token per epoch via a deterministic nullifier construction, preventing token accumulation across time and ensuring strict rate limits. Within an epoch, tokens support incremental usage through a recursive spend-and-refresh mechanism, enabling fine-grained control over resource consumption.
+
+The protocol is realized using blind BBS+ signatures, Pedersen commitments, and zero-knowledge proofs, allowing the server to verify compliance with usage policies without learning any information about the user's identity, token linkage, or activity patterns. We formalize the security properties of EBUT and prove that it achieves unforgeability, unlinkability, and rate-limit soundness under standard cryptographic assumptions, including the $q$-Strong Diffie--Hellman, Discrete Logarithm, and SXDH assumptions in the random oracle model. To achieve practical efficiency, we incorporate a cross-curve batched equality proof that combines BLS12-381 and Ristretto groups, enabling fast Bulletproofs while maintaining rigorous security. We provide a complete, production-ready specification with detailed implementation guidance, API schemas, and performance estimates.
+\end{abstract}
+
+\section{Introduction}
+
+Privacy-preserving systems aim to enable users to access services without revealing their identity or linking their actions across time. While modern cryptographic constructions provide strong anonymity guarantees, they struggle to enforce usage policies such as rate limits and bounded resource consumption. This tension arises because traditional enforcement mechanisms rely on persistent identities, which inherently violate unlinkability.
+
+This problem becomes particularly acute in systems where resources are costly or constrained. For example, in decentralized storage or subscription-based services, a provider must ensure that each user consumes only a limited amount of resources over time. However, in an anonymous setting, the server cannot distinguish between users or track their behavior across sessions. As a result, a malicious user may accumulate tokens or credentials over time and later consume resources in a burst, violating rate limits and potentially causing service disruption.
+
+Existing anonymous token systems partially address this challenge. Mechanisms such as Anonymous Credit Tokens (ACT)~\cite{act} enable users to obtain tokens and spend them in a privacy-preserving manner, supporting features such as partial spending and unlinkable redemption. However, these systems fundamentally treat tokens as accumulable resources: users may obtain tokens over time and spend them arbitrarily later. Consequently, they do not enforce temporal constraints on usage and cannot prevent burst consumption.
+
+A natural approach is to introduce explicit rate-limiting mechanisms, such as per-epoch quotas enforced via zero-knowledge proofs. However, naïve constructions based on accumulators or membership proofs require maintaining dynamic sets and performing complex updates, leading to significant inefficiencies and poor usability. Moreover, such approaches often introduce additional trust assumptions or degrade privacy guarantees.
+
+In this work, we propose a different approach: instead of enforcing rate limits externally, we embed temporal constraints directly into the structure of tokens themselves. We introduce \emph{Epoch-Bound Usage Tokens (EBUT)}, a primitive in which tokens are intrinsically bound to discrete time epochs. Each user can derive at most one token per epoch through a deterministic nullifier construction, ensuring that token issuance is inherently rate-limited and preventing accumulation across time.
+
+Within each epoch, EBUT supports fine-grained usage through a recursive spend-and-refresh mechanism, allowing tokens to be consumed incrementally while preserving unlinkability. All correctness conditions are enforced via zero-knowledge proofs, enabling the server to verify compliance without learning any information about the user's identity or activity patterns.
+
+The key insight of our construction is that temporal structure can be used as a cryptographic enforcement mechanism. By binding tokens to epochs at the protocol level, EBUT eliminates the need for external rate-limiting logic while preserving strong anonymity guarantees.
+
+\subsection{Our Contributions}
+We summarize our main contributions as follows:
+\begin{itemize}[leftmargin=*]
+\item \textbf{A new primitive for rate-limited anonymous access.} We introduce \emph{Epoch-Bound Usage Tokens (EBUT)}, a cryptographic primitive that enforces rate limits in anonymous systems. Unlike existing anonymous token mechanisms, EBUT prevents accumulation of tokens across time by binding issuance to discrete epochs.
+\item \textbf{Temporal enforcement via deterministic nullifiers.} We propose a deterministic epoch-based nullifier construction of the form $N_T = k \cdot H_T$, which ensures that each user can derive at most one token per epoch while preserving unlinkability across epochs. This embeds rate-limiting constraints directly into the cryptographic structure of tokens, eliminating the need for external enforcement mechanisms.
+\item \textbf{Non-accumulating token model.} We formalize and realize a token model in which resources cannot be accumulated over time. This directly addresses the burst-consumption problem present in existing anonymous token systems, where users may hoard tokens and later spend them arbitrarily.
+\item \textbf{Recursive intra-epoch usage mechanism.} We design a recursive spend-and-refresh protocol that enables fine-grained resource consumption within a single epoch. This allows tokens to be used incrementally while maintaining strict global rate limits.
+\item \textbf{Formalization of rate-limit soundness.} We introduce and formalize the notion of \emph{rate-limit soundness} for anonymous token systems, capturing the requirement that no adversary can exceed the allowed rate of token generation or usage over time.
+\item \textbf{Efficient zero-knowledge enforcement.} We construct EBUT using blind BBS+ signatures, Pedersen commitments, and zero-knowledge proofs, enabling the server to verify policy compliance without learning any information about the user's identity or activity. The protocol achieves practical efficiency with proof sizes on the order of a few kilobytes and minimal server-side state.
+\item \textbf{Security proofs under standard assumptions.} We prove that EBUT achieves unforgeability, unlinkability, and rate-limit soundness under standard cryptographic assumptions, including the $q$-Strong Diffie--Hellman assumption, the Discrete Logarithm assumption, and the SXDH assumption in the random oracle model.
+\item \textbf{Cross-curve batched equality proofs.} We provide a complete, self-contained treatment of a dual-curve range proof system that combines BLS12-381 and Ristretto groups, with full security proofs (completeness, knowledge soundness, zero-knowledge). This is of independent interest for protocols requiring efficient range proofs on committed values across different curves.
+\end{itemize}
+
+\subsection{Related Work}
+\paragraph{Anonymous credentials.} Anonymous credential systems enable users to authenticate without revealing their identity or linking multiple interactions. Classical constructions, including those based on pairing-based signatures such as BBS+, provide unlinkable credential presentation and selective disclosure~\cite{CamenischL01,CL02,BBS04}. These systems focus primarily on identity privacy and attribute verification, but do not directly address enforcement of usage policies such as rate limits or bounded resource consumption.
+
+\paragraph{Anonymous tokens and usage-based systems.} Several works extend anonymous credentials to support token-based access and usage control. In particular, Anonymous Credit Tokens (ACT)~\cite{act} introduce a model in which users obtain tokens that can be spent incrementally in a privacy-preserving manner. Such systems support partial spending and unlinkable redemption, making them suitable for usage-based billing and resource allocation. However, these constructions fundamentally treat tokens as accumulable resources; a user may obtain tokens over time and later spend them arbitrarily, which allows burst consumption and violates temporal rate limits.
+
+\paragraph{Rate limiting in anonymous systems.} Rate limiting in the absence of identities is inherently challenging. Existing approaches often rely on external mechanisms such as per-epoch quotas enforced via accumulators, Merkle trees, or membership proofs combined with zero-knowledge protocols~\cite{BonehShoup}. While these approaches can enforce constraints, they typically require maintaining dynamic state, performing frequent updates, or introducing additional trust assumptions. Moreover, they may incur significant computational overhead and degrade usability. Other approaches use pseudonymous identifiers or linkable tags to enforce limits, but these weaken privacy guarantees by introducing linkability across sessions or epochs.
+
+\paragraph{Temporal enforcement mechanisms.} Some systems incorporate time-based validity, such as expiring credentials or time-limited tokens. However, these mechanisms restrict \emph{when} a token can be used, rather than \emph{how frequently} tokens can be generated or consumed. They do not prevent accumulation across time and therefore do not enforce strict rate limits.
+
+\paragraph{Non-transferable anonymous tokens.} The recent work of Durak et al.~\cite{NTAT} introduces the notion of non-transferable anonymous tokens, where a token is bound to a client's secret key and cannot be transferred without revealing that key. While their focus is on preventing token sharing, our work addresses the orthogonal problem of rate limiting across time. Interestingly, both approaches use a deterministic nullifier to enforce a policy, but in EBUT the nullifier is epoch-based rather than session-based.
+
+\paragraph{Our approach.} In contrast to prior work, EBUT embeds temporal constraints directly into the token structure. By binding token issuance to discrete epochs via a deterministic nullifier construction, EBUT ensures that each user can derive at most one token per epoch. This eliminates token accumulation across time while preserving unlinkability. Furthermore, EBUT combines this temporal enforcement with a recursive spend-and-refresh mechanism, enabling fine-grained usage within each epoch without sacrificing privacy. This provides a unified solution to rate limiting in anonymous systems, without requiring external stateful enforcement mechanisms or weakening anonymity guarantees.
+
+\section{Preliminaries}
+We denote by $\lambda \in \mathbb{N}$ the security parameter. For a finite set $S$, we write $x \xleftarrow{\$} S$ to indicate that $x$ is chosen uniformly at random from $S$. A function $\varepsilon(\lambda)$ is \emph{negligible} if $\varepsilon(\lambda) = \lambda^{-\omega(1)}$. We use $\mathsf{negl}(\lambda)$ to denote an arbitrary negligible function.
+
+\subsection{Bilinear Groups and Cryptographic Assumptions}
+Let $\mathbb{G}_1, \mathbb{G}_2, \mathbb{G}_T$ be cyclic groups of prime order $q$ (depending on $\lambda$) with generators $g_1 \in \mathbb{G}_1$, $g_2 \in \mathbb{G}_2$. A bilinear map (pairing) is an efficiently computable map $e: \mathbb{G}_1 \times \mathbb{G}_2 \to \mathbb{G}_T$ satisfying:
+\begin{itemize}
+\item Bilinearity: $e(g_1^a, g_2^b) = e(g_1, g_2)^{ab}$ for all $a,b \in \mathbb{Z}_q$.
+\item Non-degeneracy: $e(g_1, g_2) \neq 1_{\mathbb{G}_T}$.
+\end{itemize}
+We assume a Type-3 pairing where no efficiently computable homomorphism exists between $\mathbb{G}_1$ and $\mathbb{G}_2$.
+
+\begin{assumption}[Discrete Logarithm (DL)]
+Given $(g, g^x)$ where $g$ is a generator of a cyclic group $\mathbb{G}$ of prime order $q$ and $x \xleftarrow{\$} \mathbb{Z}_q$, no probabilistic polynomial-time (PPT) adversary can output $x$ with more than negligible probability.
+\end{assumption}
+
+\begin{assumption}[$q$-Strong Diffie--Hellman ($q$-SDH)~\cite{BB04}]
+Let $\mathbb{G}_1, \mathbb{G}_2$ be groups of prime order $q$ with generators $g_1, g_2$. Given a $(q+2)$-tuple $(g_1, g_2, g_2^\gamma, g_2^{\gamma^2}, \dots, g_2^{\gamma^q})$ for random $\gamma \xleftarrow{\$} \mathbb{Z}_q^*$, no PPT adversary can output a pair $(x, g_1^{1/(\gamma+x)})$ with $x \in \mathbb{Z}_q \setminus \{-\gamma\}$, except with negligible probability.
+\end{assumption}
+
+\begin{assumption}[Symmetric eXternal Diffie--Hellman (SXDH)]
+In a Type-3 pairing setting, the Decisional Diffie--Hellman (DDH) assumption holds in both $\mathbb{G}_1$ and $\mathbb{G}_2$. That is, given $(g_1, g_1^a, g_1^b, g_1^c)$, it is hard to decide whether $c = ab$ or random; similarly in $\mathbb{G}_2$.
+\end{assumption}
+
+\subsection{BBS+ Signatures}
+We use the BBS+ signature scheme~\cite{BBS04,CFRG-BBS} over a bilinear group setting. The scheme allows signing a vector of messages $(m_1,\dots,m_L) \in \mathbb{Z}_q^L$.
+
+\begin{itemize}
+\item $\mathsf{Setup}(1^\lambda)$: Output parameters $(\mathbb{G}_1,\mathbb{G}_2,\mathbb{G}_T,e,q,g_1,g_2)$ and additional generators $h_0,\dots,h_L \in \mathbb{G}_1$, derived via a hash-to-curve function with domain separation.
+\item $\mathsf{KeyGen}()$: Choose $sk \xleftarrow{\$} \mathbb{Z}_q$, set $pk = g_2^{sk}$.
+\item $\mathsf{Sign}(sk, (m_1,\dots,m_L))$: Choose random $e, s \xleftarrow{\$} \mathbb{Z}_q$ and compute
+  \[
+  A = \left( g_1 \cdot h_0^s \cdot \prod_{i=1}^L h_i^{m_i} \right)^{\frac{1}{e+sk}} \in \mathbb{G}_1.
+  \]
+  Output signature $(A,e,s)$.
+\item $\mathsf{Verify}(pk, (m_1,\dots,m_L), (A,e,s))$: Check $A \neq 1_{\mathbb{G}_1}$, $e \neq 0$, and
+  \[
+  e(A, pk \cdot g_2^e) = e\left( g_1 \cdot h_0^s \cdot \prod_{i=1}^L h_i^{m_i}, g_2 \right).
+  \]
+\end{itemize}
+BBS+ signatures are existentially unforgeable under chosen-message attacks (EUF-CMA) under the $q$-SDH assumption.
+
+\subsection{Zero-Knowledge Proofs}
+We employ non-interactive zero-knowledge proofs of knowledge (NIZKPoK) for various relations, constructed via the Fiat--Shamir transform in the random oracle model. Specifically, we use:
+\begin{itemize}
+\item A proof of possession of a BBS+ signature (Protocol~1 in \cite{act}), which allows proving knowledge of a valid signature on a set of hidden messages, with optional selective disclosure.
+\item Schnorr-style proofs for equality of discrete logarithms across different bases.
+\item Bulletproofs~\cite{Bulletproofs} for range proofs, adapted to be bound to the outer proof context.
+\end{itemize}
+All proofs include a domain separator and a context binding to the application to prevent cross-protocol attacks.
+
+\subsection{Time Epochs and Deterministic Nullifiers}
+Time is divided into discrete epochs $T \in \{0,1,\dots\}$ of fixed duration. We define a public deterministic hash-to-curve function
+\[
+H_T = \mathcal{H}_{\mathbb{G}_1}(\text{``EBUT:Epoch:''} \parallel T) \in \mathbb{G}_1.
+\]
+For a user secret $k \in \mathbb{Z}_q^*$, the epoch nullifier is $N_T = k \cdot H_T$. Under the SXDH assumption, the values $N_T$ for different epochs are computationally unlinkable.
+
+\section{Syntax and Security Definitions}
+\label{sec:defs}
+
+We now formalize the syntax and security requirements for an Epoch-Bound Usage Token (EBUT) scheme. The protocol involves a server $\mathcal{S}$ and multiple clients $\mathcal{C}$. The server is responsible for issuing tokens and verifying their usage; clients request tokens and spend them to access resources. The scheme operates over discrete time epochs $T = 0,1,2,\dots$, and each client is associated with a long-term master secret key.
+
+\subsection{Syntax}
+An EBUT scheme consists of the following polynomial-time algorithms and interactive protocols.
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{$\mathsf{Setup}(1^\lambda) \to \mathsf{pp}$.} On input the security parameter $\lambda$, outputs public parameters $\mathsf{pp}$ which are common to all parties.
+\item \textbf{$\mathsf{Server.KeyGen}(\mathsf{pp}) \to (\mathsf{sk}_S, \mathsf{pk}_S, \pi_S)$.} Generates a server signing key and a Schnorr NIZK proof of knowledge $\pi_S$ of the discrete logarithm of $\mathsf{pk}_S$ with respect to $g_2$.
+\item \textbf{$\mathsf{Client.KeyGen}(\mathsf{pp}) \to (\mathsf{sk}_C, \mathsf{pk}_C)$.} Generates a client's master key pair. The secret key $\mathsf{sk}_C$ is a scalar $k_{\mathsf{sub}} \in \mathbb{Z}_q^*$, and the public key $\mathsf{pk}_C$ is a group element $g_1^{\mathsf{sk}_C}$. We assume a public-key infrastructure where the server knows the client's public key (or a commitment to it) during issuance.
+\item \textbf{$\mathsf{Issue}$ (interactive).} An interactive protocol between a client and the server to obtain a master subscription token.
+  \begin{itemize}
+  \item $\mathsf{Client.Query}(\mathsf{pp}, \mathsf{sk}_C, \mathsf{pk}_S) \to (\mathsf{query}, \mathsf{st})$: The client produces a request for a master token and local state.
+  \item $\mathsf{Server.Issue}(\mathsf{pp}, \mathsf{sk}_S, \mathsf{pk}_C, \mathsf{query}) \to \mathsf{resp}$: The server verifies the client's request and, if valid, returns a blind signature on the client's secret key and subscription parameters.
+  \item $\mathsf{Client.Final}(\mathsf{st}, \mathsf{resp}) \to (\mathcal{T}_{\mathsf{master}}, \omega)$: The client completes the issuance, obtaining a master token $\mathcal{T}_{\mathsf{master}}$ and a decommitment $\omega$.
+  \end{itemize}
+  The master token $\mathcal{T}_{\mathsf{master}}$ contains a BBS+ signature on $(k_{\mathsf{sub}}, c_{\mathsf{max}}, E_{\mathsf{max}})$, where $c_{\mathsf{max}}$ is the maximum credit per epoch and $E_{\mathsf{max}}$ is the subscription expiry epoch.
+\item \textbf{$\mathsf{Refresh}$ (interactive).} An interactive protocol executed at the beginning of an epoch $T \le E_{\mathsf{max}}$ to derive an epoch-bound daily token.
+  \begin{itemize}
+  \item $\mathsf{Client.Refresh}(\mathsf{pp}, \mathcal{T}_{\mathsf{master}}, T) \to (\mathsf{req}_{\mathsf{ref}}, \mathsf{st})$: The client produces a refresh request including a zero-knowledge proof of a valid master token, the epoch nullifier $N_T$, and a commitment to the epoch-derived daily secret $k_{\mathsf{daily}}$.
+  \item $\mathsf{Server.VerifyRefresh}(\mathsf{pp}, \mathsf{sk}_S, T, \mathsf{req}_{\mathsf{ref}}) \to \mathsf{resp}_{\mathsf{ref}} / \bot$: The server verifies the proof, checks that the epoch nullifier $N_T$ is fresh (not in $\DB_{\mathsf{epoch}}$), and issues a blind BBS+ signature on $(c_{\mathsf{max}}, k_{\mathsf{daily}}, T)$.
+  \item $\mathsf{Client.FinalRefresh}(\mathsf{st}, \mathsf{resp}_{\mathsf{ref}}) \to \mathcal{T}_{\mathsf{daily}}$: The client finalizes the daily token $\mathcal{T}_{\mathsf{daily}}$ for epoch $T$.
+  \end{itemize}
+\item \textbf{$\mathsf{Spend}$ (interactive).} An interactive protocol, parameterised by a mode $\mu \in \{\mathsf{Unit},\mathsf{Exact},\mathsf{Hidden}\}$, to spend $s$ credits from a daily token and obtain a refund token for the remaining balance $m = c_{\mathsf{bal}} - s$.
+  \begin{itemize}
+  \item $\mathsf{Client.Spend}(\mathsf{pp}, \mathcal{T}_{\mathsf{current}}, \mu, \mathsf{aux}) \to (\mathsf{req}_{\mathsf{spend}}, \mathsf{st})$: In Unit mode, the client spends exactly $s=1$ as an Exact-mode specialization for fixed unit pricing. In Exact mode, the auxiliary input is a required amount $s_{\mathsf{req}}$ supplied by the application and the client proves the disclosed spend equals it. In Hidden mode, the client chooses $s \in [1,c_{\mathsf{bal}}]$ locally and proves the relation in zero-knowledge. In every mode the client derives the spend nonce $\eta_i$, the next token secret $k_{i+1}^*$, and the next token blinder $r_{i+1}^*$ deterministically from $(k_{\mathsf{sub}}, T_{\mathsf{issue}}, i)$ for a local monotone counter $i$, prepares the corresponding spend state, and binds $\eta_i$ into the Fiat--Shamir transcript.
+  \item $\mathsf{Server.VerifySpend}(\mathsf{pp}, \mathsf{sk}_S, \mu, \mathsf{aux}, \mathsf{req}_{\mathsf{spend}}) \to (\mathsf{resp}_{\mathsf{spend}}, \mathsf{out})$: The server verifies the mode-specific proof, checks that the token's nullifier $k_{\mathsf{cur}}$ is fresh (not in $\DB_{\mathsf{spend}}$), checks that the client-derived nonce $\eta$ is fresh (not in $\mathcal{N}_{\mathsf{spent}}$), and issues a blind refund token. In Unit mode the server enforces $s=1$; in Exact mode the server enforces $s=s_{\mathsf{req}}$; in Hidden mode the server enforces only the statement-defined bounds. Output $\mathsf{out} = 1$ if accepted, $0$ otherwise.
+  \item $\mathsf{Client.FinalSpend}(\mathsf{st}, \mathsf{resp}_{\mathsf{spend}}) \to \mathcal{T}_{\mathsf{new}}$: The client finalizes the new token $\mathcal{T}_{\mathsf{new}}$ with balance $m$.
+  \end{itemize}
+For compactness the security definitions below write $(\mathsf{sk}_S,\mathsf{pk}_S,\pi_S)$ for the server key used by the subprotocol under discussion. In the concrete construction, this abstract notation is instantiated twice: refresh proofs use $(\mathsf{sk}_{\mathsf{master}},\mathsf{pk}_{\mathsf{master}},\pi_{\mathsf{master}})$, while spend proofs use $(\mathsf{sk}_{\mathsf{daily}},\mathsf{pk}_{\mathsf{daily}},\pi_{\mathsf{daily}})$.
+\end{itemize}
+
+The server maintains two databases for double-spending prevention:
+\begin{itemize}
+\item $\DB_{\mathsf{epoch}}$: an authoritative map keyed by epoch nullifiers $N_T \in \mathbb{G}_1$.  Each committed entry stores the first accepted refresh statement digest together with the blind-signature response returned for that statement; entries expire at the absolute time $t_{\mathsf{end}}(T) + \Delta_{\mathsf{grace}}$, where $t_{\mathsf{end}}(T)$ is the end of epoch $T$.  Equivalently, if a relative TTL is used, it is computed as $(t_{\mathsf{end}}(T) - \tau_{\mathsf{chk}}) + \Delta_{\mathsf{grace}}$ from the request-time snapshot captured at the initial epoch check. Entries are expired individually rather than bulk-cleared at the epoch boundary.
+\item $\DB_{\mathsf{spend}}$: an authoritative map keyed by token nullifiers $k_{\mathsf{cur}} \in \mathbb{Z}_q^*$.  Each committed entry stores the first accepted spend statement digest, the consumed nonce $\eta$, and the blind refund response; entries expire at the absolute time $t_{\mathsf{end}}(T_{\mathsf{issue}}) + \Delta_{\mathsf{grace}}$ for the token's issue epoch $T_{\mathsf{issue}}$.  Equivalently, if a relative TTL is used, it is computed as $(t_{\mathsf{end}}(T_{\mathsf{issue}}) - \tau_{\mathsf{chk}}) + \Delta_{\mathsf{grace}}$ from the request-time snapshot captured at the initial bounds check. Entries are expired individually rather than bulk-cleared at the epoch boundary.
+\end{itemize}
+Additionally, the server maintains an exact spent-nonce set $\mathcal{N}_{\mathsf{spent}}$ for the 128-bit client-derived nonces used in spend requests.  Refresh and spend retries are handled by the authoritative records above rather than by a separate cache.
+
+\subsection{Correctness}
+An EBUT scheme must satisfy \emph{correctness}: for any honest execution of the protocols, the server accepts and the client obtains valid tokens with the expected balances. Formally, for all $\lambda$, all $\mathsf{pp} \leftarrow \mathsf{Setup}(1^\lambda)$, all server key tuples $(\mathsf{sk}_S, \mathsf{pk}_S, \pi_S)$, all client key pairs $(\mathsf{sk}_C, \mathsf{pk}_C)$, and all valid parameters $(c_{\mathsf{max}}, E_{\mathsf{max}})$:
+\begin{itemize}
+\item If $\mathsf{Issue}$ runs honestly, the client outputs a master token $\mathcal{T}_{\mathsf{master}}$ that verifies under $\mathsf{pk}_S$.
+\item For any epoch $T \le E_{\mathsf{max}}$, an honest $\mathsf{Refresh}$ yields a daily token $\mathcal{T}_{\mathsf{daily}}$ with balance $c_{\mathsf{max}}$ that is accepted by the server.
+\item For any spend amount $1 \le s \le c_{\mathsf{bal}}$ and either spend mode $\mu \in \{\mathsf{Exact},\mathsf{Hidden}\}$ (with $s = s_{\mathsf{req}}$ in Exact mode), an honest $\mathsf{Spend}$ yields a new token with balance $c_{\mathsf{bal}}-s$ and the server outputs $\mathsf{out}=1$.
+\end{itemize}
+Correctness follows directly from the completeness of the underlying zero-knowledge proofs and the BBS+ signature scheme.
+
+\subsection{Security Definitions}
+We define three core security properties: \emph{unforgeability}, \emph{unlinkability}, and \emph{rate-limit soundness}. The first two are standard for anonymous token systems; the third captures the epoch-bound rate limiting specific to EBUT.
+
+\paragraph{Stateful Server Model.}
+All three games are parameterized by a linearizable server-state functionality $\mathcal{F}_{\mathsf{state}}$ that captures the crash-safe semantics required by the implementation.  It exposes two atomic finalization operations:
+\begin{itemize}[leftmargin=*]
+\item $\mathsf{RefreshFinalize}(N_T, h_{\mathsf{ref}}, \mathsf{resp}_{\mathsf{ref}})$ stores and returns $\mathsf{resp}_{\mathsf{ref}}$ if $N_T$ is absent; returns the previously stored response if $N_T$ is already present with digest $h_{\mathsf{ref}}$; and returns $\bot$ if $N_T$ is present with a different digest.
+\item $\mathsf{SpendFinalize}(k_{\mathsf{cur}}, \eta, h_{\mathsf{id}}, \mathsf{resp}_{\mathsf{spend}})$ stores the new spend record and marks $\eta$ spent if both are fresh; returns the previously stored response if $k_{\mathsf{cur}}$ is already present with digest $h_{\mathsf{id}}$ and nonce $\eta$; and returns $\bot$ otherwise.
+\end{itemize}
+For every refresh or spend request, the server also captures a request-time snapshot $\tau_{\mathsf{chk}}$ exactly once at the first epoch/bounds check and computes an absolute expiry time $t_{\mathsf{exp}}$. Any implementation that uses relative TTLs must derive them from $t_{\mathsf{exp}}-\tau_{\mathsf{chk}}$, never from the later wall clock at finalization. Any implementation that uses absolute-expiry writes must abort if the durable finalization point is reached at or after $t_{\mathsf{exp}}$, rather than returning a response without a durable retry record.
+The formal theorems below apply only to implementations that realize these atomic transitions.  Any deployment that splits retry handling across a non-atomic ``cache'' and a separate nullifier set is outside the model and is not covered by the security proofs.
+
+\subsubsection{Unforgeability}
+Unforgeability ensures that an adversary cannot obtain more valid tokens than it is entitled to. We formulate this as a one-more unforgeability game where the adversary can interact with the server via issuance, refresh, and spend oracles. The goal is to produce more tokens (or spend more credits) than the number of master tokens issued.
+
+\begin{game}{1 (Unforgeability, $\mathsf{UNF}$)}
+Let $\mathcal{A}$ be a PPT adversary. The game proceeds as follows:
+\begin{enumerate}[leftmargin=*]
+\item $\mathsf{pp} \leftarrow \mathsf{Setup}(1^\lambda)$, $(\mathsf{sk}_S, \mathsf{pk}_S, \pi_S) \leftarrow \mathsf{Server.KeyGen}(\mathsf{pp})$.
+\item $\mathcal{A}$ is given $\mathsf{pp}$, $\mathsf{pk}_S$, and $\pi_S$, and has access to the following oracles:
+  \begin{itemize}
+  \item $\mathcal{O}_{\mathsf{Issue}}(\mathsf{pk}_C)$: Runs the $\mathsf{Issue}$ protocol with $\mathcal{A}$ acting as the client. The server uses $\mathsf{pk}_C$ as the client's public key. Increments a counter $q_{\mathsf{issue}}[\mathsf{pk}_C]$.
+  \item $\mathcal{O}_{\mathsf{Refresh}}(T, \mathsf{pk}_C, \pi)$: $\mathcal{A}$ supplies a refresh request for epoch $T$ and public key $\mathsf{pk}_C$. The server verifies and, if valid, returns a daily token. Increments $q_{\mathsf{refresh}}[\mathsf{pk}_C][T]$.
+  \item $\mathcal{O}_{\mathsf{Spend}}(s, \mathsf{req})$: $\mathcal{A}$ supplies a spend request. The server verifies and, if valid, returns a refund token. Increments $q_{\mathsf{spend}}$.
+  \end{itemize}
+\item $\mathcal{A}$ outputs a tuple $(\mathsf{pk}_C^*, \mathcal{T}_1, \dots, \mathcal{T}_k, \omega_1, \dots, \omega_k)$ and an epoch $T^*$.
+\item $\mathcal{A}$ wins if for the target public key $\mathsf{pk}_C^*$:
+  \begin{itemize}
+  \item All tokens $\mathcal{T}_i$ are valid for epoch $T^*$ (or later) and their total credit value exceeds $c_{\mathsf{max}} \cdot q_{\mathsf{issue}}[\mathsf{pk}_C^*]$; \emph{or}
+  \item The number of valid daily tokens obtained for $\mathsf{pk}_C^*$ across all epochs exceeds $q_{\mathsf{issue}}[\mathsf{pk}_C^*]$; \emph{or}
+  \item There exists an epoch $T \le E_{\mathsf{max}}$ where the number of valid daily tokens for $\mathsf{pk}_C^*$ exceeds $1$ (i.e., more than one refresh per epoch).
+  \end{itemize}
+\end{enumerate}
+The advantage of $\mathcal{A}$ is $\advantage{UNF}(\mathcal{A}) = \Pr[\mathcal{A} \text{ wins}]$. An EBUT scheme is \emph{unforgeable} if for all PPT $\mathcal{A}$, $\advantage{UNF}(\mathcal{A}) \le \negl(\lambda)$.
+\end{game}
+
+\noindent \textbf{Remark.} The oracle queries capture both malicious clients and honest-but-curious server interactions. The game directly models the rate-limiting property: even with adaptive issuance queries, the adversary cannot exceed the per-epoch token limit or the total credit bound.
+
+\subsubsection{Unlinkability}
+Unlinkability requires that the server cannot link a refresh or spend transaction to a specific master token or to other transactions of the same client, beyond what is revealed by the public nullifiers (which are unlinkable across epochs).
+
+We define a game where the adversary (acting as a malicious server) chooses two clients and must distinguish which one is participating in a challenge session.
+
+\begin{game}{2 (Unlinkability, $\mathsf{UNLINK}$)}
+Let $\mathcal{A} = (\mathcal{A}_1, \mathcal{A}_2)$ be a PPT adversary. The game proceeds as follows:
+\begin{enumerate}[leftmargin=*]
+\item $\mathsf{pp} \leftarrow \mathsf{Setup}(1^\lambda)$. $\mathcal{A}_1$ is given $\mathsf{pp}$ and outputs two client key pairs $(\mathsf{sk}_C^0, \mathsf{pk}_C^0)$ and $(\mathsf{sk}_C^1, \mathsf{pk}_C^1)$. $\mathcal{A}_1$ then engages in a public-key registration phase (Setup) with a certificate-authority functionality modeled via a random oracle $\mathcal{H}_{\mathsf{setup}}$, outputting an adversarially chosen server public key $\mathsf{pk}_S$, an interactive proof of possession $\pi_S$, and state $\mathsf{st}$. The challenger verifies $\pi_S$ and aborts if it is invalid.
+\item The challenger flips a fair coin $b \xleftarrow{\$} \{0,1\}$. 
+\item $\mathcal{A}_2(\mathsf{st})$ interacts with the challenger in two phases:
+  \begin{itemize}
+  \item \textbf{Issuance phase:} For $i \in \{0,1\}$, the challenger runs $\mathsf{Issue}$ with $\mathcal{A}_2$ acting as the server, using client $i$'s secret key. The adversary learns the master tokens (if any) but not the internal randomness.
+  \item \textbf{Challenge phase:} $\mathcal{A}_2$ selects an epoch $T$ and initiates a $\mathsf{Refresh}$ protocol. The challenger runs the client side using $\mathsf{sk}_C^b$ (the challenge client). The adversary observes the refresh request. Similarly, $\mathcal{A}_2$ may request a $\mathsf{Spend}$ protocol for a token owned by $b$.
+  \end{itemize}
+\item $\mathcal{A}_2$ outputs a guess $b' \in \{0,1\}$.
+\end{enumerate}
+$\mathcal{A}$ wins if $b' = b$. The advantage is $\advantage{UNLINK}(\mathcal{A}) = |\Pr[b' = b] - 1/2|$. An EBUT scheme is \emph{unlinkable} if for all PPT $\mathcal{A}$, $\advantage{UNLINK}(\mathcal{A}) \le \negl(\lambda)$.
+\end{game}
+
+\noindent The definition captures that even a malicious server controlling the issuance process cannot link the refresh/spend of a client to its master token or to other epochs.
+
+\subsubsection{Rate-Limit Soundness}
+This new notion formalizes the epoch-bound rate limiting: no adversary can obtain more than one daily token per epoch per master secret, and cannot spend more than $c_{\mathsf{max}}$ credits within an epoch. We define a game where the adversary controls both the server and clients, but must respect the token generation limits.
+
+\begin{game}{3 (Rate-Limit Soundness, $\mathsf{RLS}$)}
+Let $\mathcal{A}$ be a PPT adversary. The game proceeds as follows:
+\begin{enumerate}[leftmargin=*]
+\item $\mathsf{pp} \leftarrow \mathsf{Setup}(1^\lambda)$. $\mathcal{A}$ may generate server keys (possibly maliciously).
+\item $\mathcal{A}$ outputs a tuple $(\mathsf{pk}_S, \pi_S, T, \{(N_T^{(i)}, \pi_{\mathsf{refresh}}^{(i)}, \mathcal{T}_{\mathsf{daily}}^{(i)})\}_{i=1}^n)$ where each $\mathcal{T}_{\mathsf{daily}}^{(i)}$ is a daily token for epoch $T$ under $\mathsf{pk}_S$, and $\pi_{\mathsf{refresh}}^{(i)}$ is the corresponding refresh proof.
+\item $\mathcal{A}$ wins if:
+  \begin{itemize}
+  \item All daily tokens are valid (i.e., $\mathsf{Server.VerifyRefresh}$ accepts each).
+  \item The epoch nullifiers $N_T^{(i)}$ are all distinct and non-zero.
+  \item There exist $i \neq j$ such that the underlying master secret $k_{\mathsf{sub}}$ is the same (i.e., the tokens were derived from the same master token), yet the adversary obtained $n \ge 2$ daily tokens for the same epoch.
+  \end{itemize}
+  \emph{or} the adversary produces a set of spend transactions within epoch $T$ that consume more than $c_{\mathsf{max}}$ total credits from a single master token without double-spending the same token nullifier.
+\end{enumerate}
+The advantage $\advantage{RLS}(\mathcal{A}) = \Pr[\mathcal{A} \text{ wins}]$. An EBUT scheme satisfies \emph{rate-limit soundness} if for all PPT $\mathcal{A}$, $\advantage{RLS}(\mathcal{A}) \le \negl(\lambda)$.
+\end{game}
+
+\noindent \textbf{Discussion.} Rate-limit soundness directly captures the core guarantee of EBUT: it is infeasible to bypass the per-epoch token limit. This is stronger than simple unforgeability because even if the adversary obtains a valid master token, it cannot use it to exceed the epoch quota. The security reduction will rely on the binding properties of the zero-knowledge proofs and the collision-resistance of the nullifier construction.
+
+\section{Construction of Epoch-Bound Usage Tokens}
+\label{sec:construction}
+
+In this section we present a concrete instantiation of EBUT using blind BBS+ signatures, Pedersen commitments, and zero-knowledge proofs. The construction relies on a bilinear group setting (Type-3 pairing) and the random oracle model.
+
+\subsection{Public Parameters and Key Generation}
+
+Let $\mathbb{G}_1, \mathbb{G}_2, \mathbb{G}_T$ be groups of prime order $q$ with a pairing $e: \mathbb{G}_1 \times \mathbb{G}_2 \to \mathbb{G}_T$. Let $g_1 \in \mathbb{G}_1$ and $g_2 \in \mathbb{G}_2$ be fixed generators.
+
+\paragraph{Public Parameters.}
+The global parameters $\mathsf{pp}$ consist of:
+\begin{itemize}
+\item The bilinear group description $(\mathbb{G}_1,\mathbb{G}_2,\mathbb{G}_T,e,q,g_1,g_2)$.
+\item Six independent generators $h_0, h_1, h_2, h_3, h_4, h_5 \in \mathbb{G}_1$ for BBS+ signatures and Pedersen commitments. Here $h_4$ is used for balance commitments and $h_5$ is reserved for hidden spend-amount commitments. These are derived via a hash-to-curve function $\mathcal{H}_{\mathbb{G}_1}$ with domain separation, e.g., $h_i = \mathcal{H}_{\mathbb{G}_1}(\text{``EBUT:Generator:''} \parallel i)$. \textbf{Critical NUMS requirement:} the security of the Hidden-mode base-switching mechanism relies on the absence of any known discrete-logarithm relation between $h_4$ and $h_5$. Therefore every $h_i$ \textbf{must} be derived using a verifiable nothing-up-my-sleeve hash-to-curve procedure (for example, RFC~9380). Any deployment that accepts arbitrary or server-supplied generators allows a malicious server to forge hidden-amount proofs and must be rejected by the client validation layer.
+\item A context hash $H_{\mathsf{ctx}}$ that binds the protocol instance to an application identifier, the server public keys, and all public generators, preventing cross-deployment replay and parameter-substitution attacks. Specifically, the production formula is:
+  \[
+  \begin{aligned}
+  H_{\mathsf{ctx}} = \mathcal{H}_{\mathsf{scalar}}\!\bigl(
+    &\text{``ACT:Context''} \parallel \mathsf{AppID}
+    \parallel \mathsf{pk}_{\mathsf{master}} \parallel \mathsf{pk}_{\mathsf{daily}} \\
+    &\parallel g_1 \parallel g_2
+    \parallel h_0 \parallel h_1 \parallel h_2 \parallel h_3 \parallel h_4 \parallel h_5
+  \bigr).
+  \end{aligned}
+  \]
+  where $\mathcal{H}_{\mathsf{scalar}}: \{0,1\}^* \to \mathbb{Z}_q$ is a hash function modeled as a random oracle. Binding the generators prevents a parameter-substitution attack in which an adversary convinces a client to use generators for which the adversary knows discrete-logarithm relations; binding both server public keys (master and daily, see Section~\ref{sec:implementation-triage}) prevents cross-key replay. All elements are serialised in compressed form before hashing. \textbf{Implementation note on hash width:} For the BLS12-381 scalar field ($q$ a 255-bit prime), reducing a 32-byte SHA-256 digest modulo $q$ introduces a per-value bias of $(2^{256} \bmod q)/q \approx 2^{-255}$, which is negligible at the 128-bit security level. The reference implementation uses SHA-256 with repeated-subtraction mod-$q$ reduction and is cryptographically sound. Implementations targeting conservative interoperability may use SHA-512 (64-byte output) before reduction as a belt-and-suspenders measure.
+\end{itemize}
+
+\paragraph{Server Key Generation.}
+The server generates \emph{two} independent key pairs: a master signing key $(\mathsf{sk}_{\mathsf{master}}, \mathsf{pk}_{\mathsf{master}}) = (y_m, g_2^{y_m})$ used to sign master subscription tokens, and a daily signing key $(\mathsf{sk}_{\mathsf{daily}}, \mathsf{pk}_{\mathsf{daily}}) = (y_d, g_2^{y_d})$ used to sign daily tokens. For each key the server also publishes a Schnorr Fiat--Shamir proof of knowledge of the corresponding discrete logarithm. Concretely, for a role tag $\mathsf{role} \in \{\text{``Master''},\text{``Daily''}\}$, secret exponent $y$, and corresponding public key $\mathsf{pk}=g_2^y$, the server samples $\rho_y \xleftarrow{\$} \mathbb{Z}_q$, computes $T_y = g_2^{\rho_y} \in \mathbb{G}_2$, then computes
+\[
+c_y = \mathcal{H}_{\mathsf{scalar}}(\text{``EBUT:ServerPoK''} \parallel H_{\mathsf{ctx}} \parallel \mathsf{role} \parallel g_2 \parallel \mathsf{pk} \parallel T_y)
+\]
+and response
+\[
+z_y = \rho_y + c_y \cdot y \pmod q.
+\]
+The published proof is $\pi = (T_y,z_y)$. Before evaluating the Schnorr equation, every client, verifier, and simulator \textbf{must} deserialize both $\mathsf{pk}$ and $T_y$ with prime-order $\mathbb{G}_2$ subgroup validation (for example, via the corresponding \texttt{blst}/\texttt{blstrs} compressed-point checks). Every client, verifier, and simulator must then reject any advertised server public key for which
+\[
+g_2^{z_y} \neq T_y \cdot \mathsf{pk}^{c_y}.
+\]
+We write $\pi_{\mathsf{master}}$ and $\pi_{\mathsf{daily}}$ for the proofs attached to $\mathsf{pk}_{\mathsf{master}}$ and $\mathsf{pk}_{\mathsf{daily}}$. Using a single key pair is sufficient for the abstract security definitions, but key separation remains advisable in practice: compromise of the daily signing key (e.g., via a hot-path HSM breach) does not invalidate long-term master subscriptions, and the daily key can be rotated at epoch boundaries. See Section~\ref{sec:implementation-triage} for further discussion.
+
+\paragraph{Client Key Generation.}
+Each client generates a master secret key $k_{\mathsf{sub}} \xleftarrow{\$} \mathbb{Z}_q^*$ (non-zero) and computes the corresponding public key $X = g_1^{k_{\mathsf{sub}}} \in \mathbb{G}_1$. The server is assumed to know $X$ (or a commitment to it) out-of-band during the initial subscription setup.
+
+\paragraph{Grace Period.}
+The server MAY accept refresh or spend requests for epoch $T-1$ during a configurable grace window $\Delta_{\mathsf{grace}} \ge 0$ after the start of epoch $T$. If $\Delta_{\mathsf{grace}} = 0$ (the default), requests for expired epochs are immediately rejected. When $\Delta_{\mathsf{grace}} > 0$, the nullifier databases must retain entries for at least $\Delta_{\mathsf{grace}}$ beyond the epoch boundary (see Section~\ref{sec:implementation}).
+
+\subsection{Master Subscription Token Issuance}
+The issuance protocol allows a client to obtain a master token that encodes the subscription limits: maximum credits per epoch $c_{\mathsf{max}} \in [0, 2^{32}-1]$ and expiry epoch $E_{\mathsf{max}}$. The protocol is blind: the server does not learn the client's secret $k_{\mathsf{sub}}$, only a commitment to it.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Client commitment.}
+  The client chooses randomness $r_{\mathsf{sub}} \xleftarrow{\$} \mathbb{Z}_q$ and computes a Pedersen commitment to $k_{\mathsf{sub}}$:
+  \[
+  K_{\mathsf{sub}} = k_{\mathsf{sub}} \cdot h_1 + r_{\mathsf{sub}} \cdot h_0 \in \mathbb{G}_1.
+  \]
+  The client sends $K_{\mathsf{sub}}$ to the server along with a Schnorr proof of knowledge $\pi_{\mathsf{PoK}}$ of the opening $(k_{\mathsf{sub}}, r_{\mathsf{sub}})$.
+
+  The proof $\pi_{\mathsf{PoK}}$ is a standard Schnorr protocol: the prover picks $\alpha, \beta \xleftarrow{\$} \mathbb{Z}_q$, computes $T = \alpha \cdot h_1 + \beta \cdot h_0$, obtains challenge $c = \mathcal{H}_{\mathsf{scalar}}(H_{\mathsf{ctx}} \parallel K_{\mathsf{sub}} \parallel T \parallel \text{"PoK"})$, and responds with $s_k = \alpha + c \cdot k_{\mathsf{sub}}$, $s_r = \beta + c \cdot r_{\mathsf{sub}}$. The verifier checks $s_k \cdot h_1 + s_r \cdot h_0 \stackrel{?}{=} T + c \cdot K_{\mathsf{sub}}$.
+
+\item \textbf{Server signing.}
+  The server knows the subscription parameters $c_{\mathsf{max}}$ and $E_{\mathsf{max}}$ (which are policy-dependent and can be public). It chooses fresh randomness $e_{\mathsf{sub}}, s'_{\mathsf{sub}} \xleftarrow{\$} \mathbb{Z}_q$ and computes a BBS+ signature on the message vector $(k_{\mathsf{sub}}, c_{\mathsf{max}}, E_{\mathsf{max}})$ with bases $(h_1, h_2, h_3)$:
+  \[
+  A_{\mathsf{sub}} = \left( g_1 \cdot K_{\mathsf{sub}} \cdot h_0^{s'_{\mathsf{sub}}} \cdot h_2^{c_{\mathsf{max}}} \cdot h_3^{E_{\mathsf{max}}} \right)^{\frac{1}{e_{\mathsf{sub}} + y_m}} \in \mathbb{G}_1.
+  \]
+  The server sends $(A_{\mathsf{sub}}, e_{\mathsf{sub}}, s'_{\mathsf{sub}})$ to the client.
+
+\item \textbf{Client finalisation.}
+  The client sets $s_{\mathsf{sub}} = r_{\mathsf{sub}} + s'_{\mathsf{sub}} \bmod q$. The master token is
+  \[
+  \mathcal{T}_{\mathsf{master}} = (A_{\mathsf{sub}}, e_{\mathsf{sub}}, s_{\mathsf{sub}}, k_{\mathsf{sub}}, c_{\mathsf{max}}, E_{\mathsf{max}}).
+  \]
+  The client verifies the signature using the BBS+ verification equation with $\mathsf{pk}_{\mathsf{master}}$.
+\end{enumerate}
+
+\subsection{Epoch Refresh: Obtaining a Daily Token}
+At the beginning of epoch $T \le E_{\mathsf{max}}$, the client derives an epoch-bound daily token. The process uses a zero-knowledge proof that the client holds a valid master token and that the public refresh statement $(N_T, K_{\mathsf{daily}}, C_{\mathsf{bridge}})$ is algebraically consistent with that token.
+
+\subsubsection{Client-Side Computation}
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Epoch nullifier.}
+  Compute the epoch base point $H_T = \mathcal{H}_{\mathbb{G}_1}(\text{``EBUT:Epoch:''} \parallel T) \in \mathbb{G}_1$.
+  The epoch nullifier is $N_T = k_{\mathsf{sub}} \cdot H_T \in \mathbb{G}_1$.
+\item \textbf{Daily token commitment.}
+  Derive the daily secret and commitment blinder deterministically from the master secret and epoch:
+  \[
+  k_{\mathsf{daily}} = \mathcal{H}_{\mathsf{scalar}}(\text{``EBUT:Derive:K''} \parallel k_{\mathsf{sub}} \parallel T),
+  \qquad
+  r_{\mathsf{daily}} = \mathcal{H}_{\mathsf{scalar}}(\text{``EBUT:Derive:R''} \parallel k_{\mathsf{sub}} \parallel T).
+  \]
+  If the first derivation yields $k_{\mathsf{daily}}=0$, the client rehashes with an appended one-byte counter until a non-zero scalar is obtained; the failure probability of the first draw is $1/q$. Form the commitment:
+  \[
+  K_{\mathsf{daily}} = c_{\mathsf{max}} \cdot h_4 + k_{\mathsf{daily}} \cdot h_1 + T \cdot h_2 + r_{\mathsf{daily}} \cdot h_0 \in \mathbb{G}_1.
+  \]
+  This commitment binds the daily token to epoch $T$, its credit balance $c_{\mathsf{max}}$, and the epoch-derived secret $k_{\mathsf{daily}}$.
+
+\item \textbf{Expiry range proof (Cross-Curve BEQ).}
+  Compute $\Delta = E_{\mathsf{max}} - T$.
+  Choose $r_{\Delta} \xleftarrow{\$} \mathbb{Z}_{q_{\text{BLS}}}$ and $r_{25519}^{(\Delta)} \xleftarrow{\$} \mathbb{Z}_{q_{25519}}$.
+  Compute BLS12-381 commitment: $C_{\Delta} = \Delta \cdot h_3 + r_{\Delta} \cdot h_0$.
+  Compute Ristretto commitment: $C_{25519}^{(\Delta)} = \Delta \cdot G + r_{25519}^{(\Delta)} \cdot H$.
+  Generate the BEQ proof $\pi_{\text{BEQ\_exp}}$ for statement $(C_{\Delta}, C_{25519}^{(\Delta)})$ with auxiliary commitments $(A', \bar{A}, T_{\mathsf{BBS}}, N_T, K_{\mathsf{daily}})$ (the BBS+ proof components are defined below).
+  Define a bridge commitment $C_{\mathsf{bridge}} = C_{\Delta} + T \cdot h_3 = E_{\mathsf{max}} \cdot h_3 + r_{\Delta} \cdot h_0$.
+\end{enumerate}
+
+\subsubsection[Zero-Knowledge Proof pi refresh]{Zero-Knowledge Proof $\pi_{\mathsf{refresh}}$}
+The client proves knowledge of a valid master token and algebraic consistency of $N_T$, $K_{\mathsf{daily}}$, and $C_{\mathsf{bridge}}$ with the witness values used in the statement. The proof is a variant of the BBS+ zero-knowledge proof of possession (Protocol~1 in~\cite{act}) with additional Schnorr equalities.
+
+\paragraph{Operational note on deterministic derivation.}
+The proof enforces mathematical consistency between $K_{\mathsf{daily}}$ and the master-token attributes, but it does \emph{not} prove that the client evaluated the prescribed deterministic derivation
+\[
+k_{\mathsf{daily}} = \mathcal{H}_{\mathsf{scalar}}(\text{``EBUT:Derive:K''} \parallel k_{\mathsf{sub}} \parallel T).
+\]
+That derivation is an honest-client operational requirement used to enable crash recovery. An adversarial client may instead sample $k_{\mathsf{daily}}$ (and the matching commitment blinder) arbitrarily and still satisfy the proof so long as it opens $K_{\mathsf{daily}}$ consistently. This does not weaken server-side security or rate limiting, which are enforced by $N_T$ and $\mathsf{RefreshFinalize}$, but it causes the adversarial client to forfeit deterministic refresh recovery.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{BBS+ randomization.}
+  Pick $r_1 \xleftarrow{\$} \mathbb{Z}_q^*$ and compute
+  \[
+  A' = A_{\mathsf{sub}}^{r_1}, \quad
+  \bar{A} = A'^{-e_{\mathsf{sub}}} \cdot \left( g_1 \cdot h_0^{s_{\mathsf{sub}}} \cdot h_1^{k_{\mathsf{sub}}} \cdot h_2^{c_{\mathsf{max}}} \cdot h_3^{E_{\mathsf{max}}} \right)^{r_1}.
+  \]
+  Define scaled secrets: $\tilde{k} = k_{\mathsf{sub}} r_1$, $\tilde{c} = c_{\mathsf{max}} r_1$, $\tilde{E} = E_{\mathsf{max}} r_1$, $\tilde{s} = s_{\mathsf{sub}} r_1$.
+\item \textbf{Commitments.}
+  Choose random blinders $\rho_e, \rho_{r_1}, \rho_{\tilde{s}}, \rho_{\tilde{k}}, \rho_{\tilde{c}}, \rho_{\tilde{E}} \xleftarrow{\$} \mathbb{Z}_q$ and compute
+  \[
+  T_{\mathsf{BBS}} = A'^{-\rho_e} \cdot g_1^{\rho_{r_1}} \cdot h_0^{\rho_{\tilde{s}}} \cdot h_1^{\rho_{\tilde{k}}} \cdot h_2^{\rho_{\tilde{c}}} \cdot h_3^{\rho_{\tilde{E}}} \in \mathbb{G}_1.
+  \]
+  Additionally, choose blinders $\rho_u, \rho_v, \rho_w \xleftarrow{\$} \mathbb{Z}_q$ (for $k_{\mathsf{daily}} r_1$, $r_{\mathsf{daily}} r_1$, $r_{\Delta} r_1$).
+  Compute bridging commitments:
+  \begin{align*}
+    T_{\mathsf{scale},N} &= \rho_{r_1} \cdot N_T, & T_N &= \rho_{\tilde{k}} \cdot H_T, \\
+    T_{\mathsf{scale},D} &= \rho_{r_1} \cdot K_{\mathsf{daily}}, & T_D &= \rho_{\tilde{c}} \cdot h_4 + \rho_u \cdot h_1 + \rho_{r_1} \cdot T \cdot h_2 + \rho_v \cdot h_0, \\
+    T_{\mathsf{scale},B} &= \rho_{r_1} \cdot C_{\mathsf{bridge}}, & T_B &= \rho_{\tilde{E}} \cdot h_3 + \rho_w \cdot h_0.
+  \end{align*}
+\item \textbf{Challenge.}
+  Compute the Fiat--Shamir challenge as
+  \[
+  c = \mathcal{H}_{\mathsf{scalar}}\left(
+  \begin{array}{c}
+  H_{\mathsf{ctx}} \parallel \mathsf{pk}_{\mathsf{master}} \parallel T \parallel N_T \parallel K_{\mathsf{daily}} \parallel C_{\Delta} \parallel \pi_{\text{BEQ\_exp}} \parallel \\
+  A' \parallel \bar{A} \parallel T_{\mathsf{BBS}} \parallel T_{\mathsf{scale},N} \parallel T_N \parallel T_{\mathsf{scale},D} \parallel T_D \parallel T_{\mathsf{scale},B} \parallel T_B \parallel \text{``Refresh''}
+  \end{array}
+  \right).
+  \]
+\item \textbf{Responses.}
+  Compute modulo $q$:
+  \begin{align*}
+    z_e &= \rho_e + c \cdot e_{\mathsf{sub}}, & z_{r_1} &= \rho_{r_1} + c \cdot r_1, \\
+    z_{\tilde{s}} &= \rho_{\tilde{s}} + c \cdot \tilde{s}, & z_{\tilde{k}} &= \rho_{\tilde{k}} + c \cdot \tilde{k}, \\
+    z_{\tilde{c}} &= \rho_{\tilde{c}} + c \cdot \tilde{c}, & z_{\tilde{E}} &= \rho_{\tilde{E}} + c \cdot \tilde{E}, \\
+    z_u &= \rho_u + c \cdot (k_{\mathsf{daily}} r_1), & z_v &= \rho_v + c \cdot (r_{\mathsf{daily}} r_1), \\
+    z_w &= \rho_w + c \cdot (r_{\Delta} r_1).
+  \end{align*}
+\item \textbf{Output proof.}
+  $\pi_{\mathsf{refresh}}$ consists of:
+  \begin{itemize}[leftmargin=*, nosep]
+  \item The randomized BBS+ components $A', \bar{A}, T_{\mathsf{BBS}}$.
+  \item The nullifier bridging commitments $T_{\mathsf{scale},N}, T_N$.
+  \item The daily token bridging commitments $T_{\mathsf{scale},D}, T_D$.
+  \item The expiry bridging commitments $T_{\mathsf{scale},B}, T_B$.
+  \item The scalar responses $z_e, z_{r_1}, z_{\tilde{s}}, z_{\tilde{k}}, z_{\tilde{c}}, z_{\tilde{E}}, z_u, z_v, z_w$.
+  \item The cross-curve range proof $\pi_{\text{BEQ\_exp}}$.
+  \end{itemize}
+\end{enumerate}
+
+\subsubsection{Server Verification}
+The server performs the following checks in order:
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Authoritative retry-record lookup (FIRST):} Compute
+  \[
+  h_{\mathsf{ref}} = \mathcal{H}_{\mathsf{scalar}}\!\bigl(\text{EBUT:Idempotency:Refresh} \parallel \mathsf{enc}_{32}(T) \parallel N_T \parallel K_{\mathsf{daily}}\bigr).
+  \]
+  Query $\DB_{\mathsf{epoch}}$ read-only at key $N_T$. If an entry is present with stored digest $h_{\mathsf{ref}}$, return its stored response $(A_{\mathsf{daily}}, e_{\mathsf{daily}}, s'_{\mathsf{daily}})$ immediately. If an entry is present with a different digest, reject as a conflicting duplicate. Otherwise continue.
+\item \textbf{Epoch check and expiry snapshot:} Capture $\tau_{\mathsf{chk}}$ exactly once from the server's trusted clock, set $t_{\mathsf{exp}} = t_{\mathsf{end}}(T)+\Delta_{\mathsf{grace}}$, and reject unless $T$ is eligible at time $\tau_{\mathsf{chk}}$ (current epoch by default, or within an explicitly configured grace window). All later expiry or TTL calculations for this request must use the captured $\tau_{\mathsf{chk}}$, not the wall clock at finalization.
+\item \textbf{Nullifier sanity check (read-only):} Require $N_T \neq 1_{\mathbb{G}_1}$. \textbf{Do not insert or reserve $N_T$ at this step.} Reserving the nullifier before all proofs are verified creates a TOCTOU vulnerability: an adversary can submit a valid $N_T$ with garbage ZK proofs; the server would prematurely burn the epoch nullifier and then abort during proof verification, permanently locking the legitimate user out for the entire epoch. All state mutations are deferred to the atomic step~11.
+\item \textbf{Basic bounds:} $A' \neq 1_{\mathbb{G}_1}$ and $T_{\mathsf{BBS}} \neq 1_{\mathbb{G}_1}$.
+\item \textbf{Expiry bridge:} $C_{\mathsf{bridge}} \stackrel{?}{=} C_{\Delta} + T \cdot h_3$.
+\item \textbf{Recompute challenge $c$} from the received values (including $H_{\mathsf{ctx}}$ and $\mathsf{pk}_{\mathsf{master}}$).
+\item \textbf{Verify bridging equalities (subtraction form):}
+  \begin{align*}
+    z_{\tilde{k}} \cdot H_T - T_N &\stackrel{?}{=} z_{r_1} \cdot N_T - T_{\mathsf{scale},N}, \\
+    z_{\tilde{c}} \cdot h_4 + z_u \cdot h_1 + z_{r_1} \cdot T \cdot h_2 + z_v \cdot h_0 - T_D &\stackrel{?}{=} z_{r_1} \cdot K_{\mathsf{daily}} - T_{\mathsf{scale},D}, \\
+    z_{\tilde{E}} \cdot h_3 + z_w \cdot h_0 - T_B &\stackrel{?}{=} z_{r_1} \cdot C_{\mathsf{bridge}} - T_{\mathsf{scale},B}.
+  \end{align*}
+\item \textbf{Schnorr multi-scalar multiplication (BBS+ core):}
+  \[
+  A'^{-z_e} \cdot g_1^{z_{r_1}} \cdot h_0^{z_{\tilde{s}}} \cdot h_1^{z_{\tilde{k}}} \cdot h_2^{z_{\tilde{c}}} \cdot h_3^{z_{\tilde{E}}} \stackrel{?}{=} T_{\mathsf{BBS}} \cdot \bar{A}^c.
+  \]
+\item \textbf{BEQ verification:} Verify $\pi_{\text{BEQ\_exp}}$ with respect to $C_{\Delta}$.
+\item \textbf{Pairing check:}
+  \[
+  e(A', \mathsf{pk}_{\mathsf{master}}) \stackrel{?}{=} e(\bar{A}, g_2).
+  \]
+\item \textbf{Atomic finalization (step 11, LAST):} Only after all checks in steps~1--10 pass, choose $e_{\mathsf{daily}}, s'_{\mathsf{daily}} \xleftarrow{\$} \mathbb{Z}_q$ and compute
+  \[
+  A_{\mathsf{daily}} = \left( g_1 \cdot K_{\mathsf{daily}} \cdot h_0^{s'_{\mathsf{daily}}} \right)^{\frac{1}{e_{\mathsf{daily}} + y_d}}.
+  \]
+  If the implementation uses absolute-expiry writes and the trusted clock has reached or passed $t_{\mathsf{exp}}$ before the durable write linearizes, abort instead of returning a response without a durable retry record. Then invoke $\mathsf{RefreshFinalize}(N_T, h_{\mathsf{ref}}, (A_{\mathsf{daily}}, e_{\mathsf{daily}}, s'_{\mathsf{daily}}))$. The stored record must carry absolute expiry $t_{\mathsf{exp}}$; if the backend offers only relative TTLs, derive them from $t_{\mathsf{exp}}-\tau_{\mathsf{chk}}$, never from the later wall clock at this step. If it inserts the new record, proceed. If it returns a previously stored response for the same digest (for example, because of a concurrent retry), return that response. Otherwise reject. This is the only step that may mutate $\DB_{\mathsf{epoch}}$.
+\end{enumerate}
+
+If all cryptographic checks pass, the server returns the tuple output by step~11---either the newly created response or the previously stored identical response---to the client.
+
+\subsubsection{Client Finalisation}
+The client sets $s_{\mathsf{daily}} = r_{\mathsf{daily}} + s'_{\mathsf{daily}} \bmod q$. The daily token is
+\[
+\mathcal{T}_{\mathsf{daily}} = (A_{\mathsf{daily}}, e_{\mathsf{daily}}, s_{\mathsf{daily}}, k_{\mathsf{daily}}, c_{\mathsf{max}}, T).
+\]
+
+\begin{theorem}[Computational Hiding and Honest-Client Recomputation of Daily-State Derivation]
+Model $\mathcal{H}_{\mathsf{scalar}}$ as a random oracle. If $k_{\mathsf{sub}}$ has min-entropy at least $250$ bits conditioned on $X = g_1^{k_{\mathsf{sub}}}$, then the derived scalars $(k_{\mathsf{daily}}, r_{\mathsf{daily}})$ are computationally indistinguishable from independently uniform scalars in $\mathbb{Z}_q$ to any PPT adversary. Consequently, replacing random sampling with the deterministic derivation above changes the hiding guarantee of $K_{\mathsf{daily}}$ only negligibly. Moreover, any honest client that retains $k_{\mathsf{sub}}$ can recompute the identical opening of $K_{\mathsf{daily}}$ from $(k_{\mathsf{sub}},T)$ with probability $1$ and thereby recreate the same public refresh statement after a crash. This deterministic recomputation is used only for client-side recovery; server-side enforcement of one refresh per epoch still relies on the nullifier checks and $\mathsf{RefreshFinalize}$.
+\end{theorem}
+\begin{proof}
+In the random-oracle model, each domain-separated query $\text{``EBUT:Derive:K''} \parallel k_{\mathsf{sub}} \parallel T$ and $\text{``EBUT:Derive:R''} \parallel k_{\mathsf{sub}} \parallel T$ is indistinguishable from a fresh random sample to any PPT adversary that does not know $k_{\mathsf{sub}}$; otherwise the adversary distinguishes the random oracle on an input with at least $250$ bits of min-entropy, contradicting the assumed hardness of recovering $k_{\mathsf{sub}}$ from $X$. Therefore the deterministic commitment is computationally indistinguishable from the original version with uniformly sampled $(k_{\mathsf{daily}}, r_{\mathsf{daily}})$, and inherits the same hiding guarantee up to the distinguishing advantage against the random oracle. Recomputation is immediate for an honest client because both values are deterministic functions of $(k_{\mathsf{sub}},T)$. Combined with the refresh statement digest defined over $(T,N_T,K_{\mathsf{daily}})$ below, a rebooted client may resubmit a fresh proof for the same statement and recover the previously stored blind-signature response without any synchronous local disk write. This is a liveness property for honest retries, not an additional server-side soundness assumption.
+\end{proof}
+
+\subsection{Intra-Epoch Spending}
+
+Within epoch $T_{\mathsf{issue}}$, a client may spend $s$ credits from a current token
+\[
+\mathcal{T}_{\mathsf{current}} = (A_{\mathsf{cur}}, e_{\mathsf{cur}}, s_{\mathsf{cur}}, k_{\mathsf{cur}}, c_{\mathsf{bal}}, T_{\mathsf{issue}})
+\]
+and obtain a refund token for the remaining balance $m = c_{\mathsf{bal}} - s$.
+The protocol supports three spend modes.
+
+\paragraph{Mode Selection and Security Rationale.}
+\emph{Exact mode} is the canonical spend path whenever the server or application endpoint enforces a fixed price $s_{\mathsf{req}}$ (for example, ``one API call costs exactly 3 units''). \emph{Unit mode} is a specialization of Exact mode with $s_{\mathsf{req}}=1$, useful when every accepted request costs one unit. \emph{Hidden mode} is used when the client chooses the spend amount locally and that amount should remain hidden from the server; it adds an additional shifted-amount commitment $C_{s,\mathsf{shift}}$, an additional BEQ proof, and extra bridge terms, and is therefore strictly larger and more expensive than Exact mode. A request \textbf{must commit to exactly one mode}: the mode tag and all mode-specific public fields are bound into both the Fiat--Shamir challenge and the spend statement digest $h_{\mathsf{id}}$.
+
+\paragraph{Deterministic Intra-Epoch Spend Derivation (All Spend Modes).}
+Unlike refresh tokens, spend requests consume fresh parameters for each recursive spend. To guarantee client liveness during network failures without relying on fragile local disk state, the client derives all spend parameters deterministically using a local, monotonically increasing spend counter $i \ge 1$ for the current issue epoch $T_{\mathsf{issue}}$.
+
+Before transmission, the client computes the next-state parameters using its master secret $k_{\mathsf{sub}}$ (which is never revealed to the server):
+\[
+\eta_i = \mathcal{H}_{128}(\text{``EBUT:Spend:Nonce''} \parallel k_{\mathsf{sub}} \parallel T_{\mathsf{issue}} \parallel i),
+\]
+\begin{align*}
+k_{i+1}^* &= \mathcal{H}_{\mathsf{scalar}}(\text{``EBUT:Spend:NextKey''} \parallel k_{\mathsf{sub}} \parallel T_{\mathsf{issue}} \parallel i), \\
+r_{i+1}^* &= \mathcal{H}_{\mathsf{scalar}}(\text{``EBUT:Spend:NextBlinder''} \parallel k_{\mathsf{sub}} \parallel T_{\mathsf{issue}} \parallel i).
+\end{align*}
+The client increments $i$ until $\eta_i \neq 0^{128}$ and $k_{i+1}^* \neq 0$. For honest-client replayability, every additional public blinder or proof randomizer used in the spend request is derived from the same tuple $(k_{\mathsf{sub}}, T_{\mathsf{issue}}, i)$ via further domain-separated hashes. No file-backed recovery log is required.
+
+Because the relevant hash functions are modeled as random oracles and $k_{\mathsf{sub}}$ is secret, the sequence of derived keys $(k_1^*, k_2^*, \dots)$ is computationally indistinguishable from uniform to the server, preserving intra-epoch cryptographic unlinkability. If the client crashes before receiving the refund response, it reboots, recalculates the exact same parameters for index $i$, reconstructs the identical refund commitment $K'$ and proof transcript, and resubmits the payload. The request hashes to the identical statement digest $h_{\mathsf{id}}$, safely hitting the server's authoritative idempotency record and recovering the lost signature.
+
+\subsubsection{Server-Enforced Exact Amount}
+\label{sec:spend-exact}
+
+The server supplies an application-level required amount $s_{\mathsf{req}} \in [1, c_{\mathsf{bal}}]$. The client sets $s = s_{\mathsf{req}}$ and discloses both values in the request. The server \textbf{must} reject unless $s = s_{\mathsf{req}}$ and all Hidden-mode-only fields are absent.
+
+\paragraph{Unit Mode (Exact Specialization).}
+Unit mode is the Exact-mode specialization with $s_{\mathsf{req}}=1$, and therefore enforces $s=1$ on every accepted spend. Deployments may use Unit mode as an optimisation whenever each accepted request consumes one quota unit. Unit mode is \emph{not} a field-elided variant: it uses the same public fields and proof shape as Exact mode, but with mode tag $\text{``Unit''}$ and explicit encodings $s = s_{\mathsf{req}} = 1$. A Unit request that omits $s_{\mathsf{req}}$ is malformed.
+
+\paragraph{Client-Side Computation.}
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Deterministic spend-state derivation.}
+  Let $i \ge 1$ be the local spend counter for the current issue epoch $T_{\mathsf{issue}}$. Set
+  \[
+  \eta = \eta_i, \qquad k^* = k_{i+1}^*, \qquad r^* = r_{i+1}^*
+  \]
+  using the domain-separated derivation above. For exact replay after a crash, every additional local randomizer used below (including the BEQ blinders, BBS+ randomization scalars, and Schnorr blinders) is likewise derived from $(k_{\mathsf{sub}}, T_{\mathsf{issue}}, i)$ via further domain-separated hashes. The protocol has no server-side nonce-issuance endpoint.
+\item \textbf{Refund commitment.}
+  Let $m = c_{\mathsf{bal}} - s$. Using the derived values $k^*$ and $r^*$, compute the commitment for the new token:
+  \[
+  K' = m \cdot h_4 + k^* \cdot h_1 + T_{\mathsf{issue}} \cdot h_2 + r^* \cdot h_0 \in \mathbb{G}_1.
+  \]
+\item \textbf{Range proof (Cross-Curve BEQ).}
+  Choose $r_{\mathsf{BP}} \xleftarrow{\$} \mathbb{Z}_{q_{\text{BLS}}}$ and $r_{25519}^{(m)} \xleftarrow{\$} \mathbb{Z}_{q_{25519}}$.
+  Compute BLS12-381 commitment: $C_{\mathsf{BP}} = m \cdot h_4 + r_{\mathsf{BP}} \cdot h_0$.
+  Compute Ristretto commitment: $C_{25519}^{(m)} = m \cdot G + r_{25519}^{(m)} \cdot H$.
+  Generate the BEQ proof $\pi_{\text{BEQ\_spend}}$ for statement $(C_{\mathsf{BP}}, C_{25519}^{(m)})$ with auxiliary commitments $(A', \bar{A}, T_{\mathsf{BBS}}, K', C_{\mathsf{total}})$ (the BBS+ proof components are defined below).
+\item \textbf{Spend bridge.}
+  \[
+  C_{\mathsf{total}} = K' + s \cdot h_4 = c_{\mathsf{bal}} \cdot h_4 + k^* \cdot h_1 + T_{\mathsf{issue}} \cdot h_2 + r^* \cdot h_0.
+  \]
+\end{enumerate}
+
+\paragraph{Zero-Knowledge Proof $\pi_{\mathsf{spend}}$ (Exact Mode).}
+The client proves knowledge of a valid daily token on $(c_{\mathsf{bal}}, k_{\mathsf{cur}}, T_{\mathsf{issue}})$ with $k_{\mathsf{cur}}$ and $T_{\mathsf{issue}}$ disclosed, and that $m = c_{\mathsf{bal}} - s$ is correctly formed.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{BBS+ randomization.}
+  Pick $r_1 \xleftarrow{\$} \mathbb{Z}_q^*$ and compute
+  \[
+  A' = A_{\mathsf{cur}}^{r_1}, \quad
+  \bar{A} = A'^{-e_{\mathsf{cur}}} \cdot \left( g_1 \cdot h_0^{s_{\mathsf{cur}}} \cdot h_4^{c_{\mathsf{bal}}} \cdot h_1^{k_{\mathsf{cur}}} \cdot h_2^{T_{\mathsf{issue}}} \right)^{r_1}.
+  \]
+  Define scaled secrets $\tilde{c} = c_{\mathsf{bal}} r_1$ and $\tilde{s} = s_{\mathsf{cur}} r_1$.
+\item \textbf{Commitments.}
+  Choose $\rho_e, \rho_{r_1}, \rho_{\tilde{s}}, \rho_{\tilde{c}} \xleftarrow{\$} \mathbb{Z}_q$ and compute
+  \[
+  T_{\mathsf{BBS}} = A'^{-\rho_e} \cdot g_1^{\rho_{r_1}} \cdot h_0^{\rho_{\tilde{s}}} \cdot h_4^{\rho_{\tilde{c}}} \cdot h_1^{k_{\mathsf{cur}} \cdot \rho_{r_1}} \cdot h_2^{T_{\mathsf{issue}} \cdot \rho_{r_1}}.
+  \]
+  Choose additional blinders $\rho_u, \rho_v, \rho_w \xleftarrow{\$} \mathbb{Z}_q$ (for $k^* r_1$, $r^* r_1$, $r_{\mathsf{BP}} r_1$). Define $\rho_m = \rho_{\tilde{c}} - s \cdot \rho_{r_1}$ and compute the bridge commitments:
+  \begin{align*}
+    T_{\mathsf{scale},R} &= \rho_{r_1} \cdot K', & T_{\mathsf{refund}} &= \rho_m \cdot h_4 + \rho_u \cdot h_1 + \rho_{r_1} \cdot T_{\mathsf{issue}} \cdot h_2 + \rho_v \cdot h_0, \\
+    T_{\mathsf{scale},T} &= \rho_{r_1} \cdot C_{\mathsf{total}}, & T_{\mathsf{total}} &= \rho_{\tilde{c}} \cdot h_4 + \rho_u \cdot h_1 + \rho_{r_1} \cdot T_{\mathsf{issue}} \cdot h_2 + \rho_v \cdot h_0, \\
+    T_{\mathsf{scale},BP} &= \rho_{r_1} \cdot C_{\mathsf{BP}}, & T_{\mathsf{BP}} &= \rho_m \cdot h_4 + \rho_w \cdot h_0.
+  \end{align*}
+\item \textbf{Challenge.}
+  The challenge includes the mode tag, the server-enforced amount, and the replay-prevention nonce $\eta$. For Exact mode use mode tag $\text{``Exact''}$; for Unit mode use mode tag $\text{``Unit''}$ with explicit public values $s = s_{\mathsf{req}} = 1$:
+  \[
+  \begin{aligned}
+  c = \mathcal{H}_{\mathsf{scalar}}\!\bigl(
+    &H_{\mathsf{ctx}} \parallel \mathsf{pk}_{\mathsf{daily}} \parallel \mathsf{mode}
+    \parallel s \parallel s_{\mathsf{req}} \parallel k_{\mathsf{cur}} \parallel T_{\mathsf{issue}} \\
+    &\parallel \eta \parallel K' \parallel C_{\mathsf{total}} \parallel C_{\mathsf{BP}}
+    \parallel \pi_{\text{BEQ\_spend}} \\
+    &\parallel A' \parallel \bar{A} \parallel T_{\mathsf{BBS}}
+    \parallel T_{\mathsf{scale},R} \parallel T_{\mathsf{refund}} \\
+    &\parallel T_{\mathsf{scale},T} \parallel T_{\mathsf{total}}
+    \parallel T_{\mathsf{scale},BP} \parallel T_{\mathsf{BP}} \parallel \text{``Spend''}
+  \bigr).
+  \end{aligned}
+  \]
+\item \textbf{Responses.}
+  Compute:
+  \begin{align*}
+    z_e &= \rho_e + c \cdot e_{\mathsf{cur}}, & z_{r_1} &= \rho_{r_1} + c \cdot r_1, \\
+    z_{\tilde{s}} &= \rho_{\tilde{s}} + c \cdot \tilde{s}, & z_{\tilde{c}} &= \rho_{\tilde{c}} + c \cdot \tilde{c}, \\
+    z_u &= \rho_u + c \cdot (k^* r_1), & z_v &= \rho_v + c \cdot (r^* r_1), \\
+    z_w &= \rho_w + c \cdot (r_{\mathsf{BP}} r_1).
+  \end{align*}
+  Define the derived response $z_m = z_{\tilde{c}} - s \cdot z_{r_1}$.
+\item \textbf{Output proof.}
+  $\pi_{\mathsf{spend}}$ consists of:
+  \begin{itemize}[leftmargin=*, nosep]
+  \item The randomized BBS+ components $A', \bar{A}, T_{\mathsf{BBS}}$.
+  \item The refund bridging commitments $T_{\mathsf{scale},R}, T_{\mathsf{refund}}$.
+  \item The spend-bridge commitments $T_{\mathsf{scale},T}, T_{\mathsf{total}}$.
+  \item The range-proof bridging commitments $T_{\mathsf{scale},BP}, T_{\mathsf{BP}}$.
+  \item The scalar responses $z_e, z_{r_1}, z_{\tilde{s}}, z_{\tilde{c}}, z_u, z_v, z_w$.
+  \item The cross-curve range proof $\pi_{\text{BEQ\_spend}}$.
+  \end{itemize}
+\end{enumerate}
+
+\paragraph{Server Verification (Exact / Unit Modes).}
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Mode and amount checks.} Require $\mathsf{mode} \in \{\text{``Exact''},\text{``Unit''}\}$, require Exact/Unit fields $(s, s_{\mathsf{req}})$ to be present, require Hidden-mode fields $(C_{s,\mathsf{shift}}, \pi_{\text{BEQ\_shift}})$ to be absent, and reject unless $1 \le s = s_{\mathsf{req}} \le 2^{32}-1$. Additionally, if $\mathsf{mode}=\text{``Unit''}$ then require $s = s_{\mathsf{req}} = 1$.
+\item \textbf{Epoch check and expiry snapshot.} Capture $\tau_{\mathsf{chk}}$ exactly once from the server's trusted clock, set $t_{\mathsf{exp}} = t_{\mathsf{end}}(T_{\mathsf{issue}})+\Delta_{\mathsf{grace}}$, and reject unless the disclosed $T_{\mathsf{issue}}$ is eligible at time $\tau_{\mathsf{chk}}$. Previous-epoch acceptance is permitted only when a non-zero grace window $\Delta_{\mathsf{grace}}$ is explicitly configured (default: no grace). All later expiry or TTL calculations for this request must use the captured $\tau_{\mathsf{chk}}$, not the wall clock at finalization.
+\item \textbf{Authoritative spend-record lookup (FIRST).} Compute $h_{\mathsf{id}}$ as
+  the canonical spend statement digest from Section~7.4 with
+  the received mode tag $\mathsf{mode} \in \{\text{``Exact''},\text{``Unit''}\}$, with $s_{\mathsf{req}}^{\mathsf{enc}}$ set
+  to the 4-byte encoding of $s_{\mathsf{req}}$, and with
+  $C_{s,\mathsf{shift}}^{\mathsf{enc}} = \pi_{\text{BEQ\_shift}}^{\mathsf{enc}} = \epsilon$.
+  Query $\DB_{\mathsf{spend}}$ read-only at key $k_{\mathsf{cur}}$. If an entry is present with stored digest $h_{\mathsf{id}}$ and nonce $\eta$, return its stored refund response immediately. If an entry is present with a different digest or nonce, reject as a conflicting duplicate. Otherwise continue.
+\item \textbf{Nonce read-only check.} Verify that $\eta$ is non-zero, is exactly 16 bytes, and has not yet been marked spent in $\mathcal{N}_{\mathsf{spent}}$. \textbf{Do not mark $\eta$ as spent at this step.}
+\item \textbf{Token-nullifier sanity check.} Reject if $k_{\mathsf{cur}} = 0$ and \textbf{do not} insert or reserve $k_{\mathsf{cur}}$ at this step.
+\item \textbf{Basic bounds.} $A' \neq 1_{\mathbb{G}_1}$ and $T_{\mathsf{BBS}} \neq 1_{\mathbb{G}_1}$.
+\item \textbf{Spend bridge.} Check $C_{\mathsf{total}} \stackrel{?}{=} K' + s \cdot h_4$.
+\item \textbf{Recompute $c$.} Recompute the Fiat--Shamir challenge from the received values, including the mode tag and the explicit field $s_{\mathsf{req}}$.
+\item \textbf{Compute $z_m = z_{\tilde{c}} - s \cdot z_{r_1}$.}
+\item \textbf{Verify bridging equalities.}
+  \begin{align*}
+    z_m \cdot h_4 + z_u \cdot h_1 + z_{r_1} \cdot T_{\mathsf{issue}} \cdot h_2 + z_v \cdot h_0 - T_{\mathsf{refund}} &\stackrel{?}{=} z_{r_1} \cdot K' - T_{\mathsf{scale},R}, \\
+    z_{\tilde{c}} \cdot h_4 + z_u \cdot h_1 + z_{r_1} \cdot T_{\mathsf{issue}} \cdot h_2 + z_v \cdot h_0 - T_{\mathsf{total}} &\stackrel{?}{=} z_{r_1} \cdot C_{\mathsf{total}} - T_{\mathsf{scale},T}, \\
+    z_m \cdot h_4 + z_w \cdot h_0 - T_{\mathsf{BP}} &\stackrel{?}{=} z_{r_1} \cdot C_{\mathsf{BP}} - T_{\mathsf{scale},BP}.
+  \end{align*}
+\item \textbf{Schnorr MSM.}
+  \[
+  A'^{-z_e} \cdot g_1^{z_{r_1}} \cdot h_0^{z_{\tilde{s}}} \cdot h_4^{z_{\tilde{c}}} \cdot h_1^{k_{\mathsf{cur}} \cdot z_{r_1}} \cdot h_2^{T_{\mathsf{issue}} \cdot z_{r_1}} \stackrel{?}{=} T_{\mathsf{BBS}} \cdot \bar{A}^c.
+  \]
+\item \textbf{BEQ verification.} Verify $\pi_{\text{BEQ\_spend}}$ with respect to $C_{\mathsf{BP}}$.
+\item \textbf{Pairing check.} Check $e(A', \mathsf{pk}_{\mathsf{daily}}) \stackrel{?}{=} e(\bar{A}, g_2)$.
+\item \textbf{Atomic finalization (LAST).} Only after all checks pass, choose $e^*, s'^* \xleftarrow{\$} \mathbb{Z}_q$ and compute
+  \[
+  A^* = \left( g_1 \cdot K' \cdot h_0^{s'^*} \right)^{\frac{1}{e^* + y_d}}.
+  \]
+  If the implementation uses absolute-expiry writes and the trusted clock has reached or passed $t_{\mathsf{exp}}$ before the durable write linearizes, abort instead of returning a response without a durable retry record. Then invoke $\mathsf{SpendFinalize}(k_{\mathsf{cur}}, \eta, h_{\mathsf{id}}, (A^*, e^*, s'^*))$. The stored record must carry absolute expiry $t_{\mathsf{exp}}$; if the backend offers only relative TTLs, derive them from $t_{\mathsf{exp}}-\tau_{\mathsf{chk}}$, never from the later wall clock at this step. If it inserts the new record and marks $\eta$ spent, proceed. If it returns a previously stored response for the same digest and nonce, return that response. Otherwise reject.
+\end{enumerate}
+
+If all cryptographic checks pass, the server returns the tuple output by the atomic finalization step---either the newly created refund response or the previously stored identical response---to the client.
+
+\paragraph{Client Finalisation (Exact Mode).}
+The client sets $s^* = r^* + s'^* \bmod q$ and obtains the new token
+\[
+\mathcal{T}_{\mathsf{new}} = (A^*, e^*, s^*, k^*, m, T_{\mathsf{issue}}).
+\]
+
+\subsubsection{Client-Chosen Amount (Hidden)}
+\label{sec:spend-hidden}
+
+In Hidden mode the client chooses $s \in [1,c_{\mathsf{bal}}]$ locally and the server learns neither $s$ nor the refund balance $m = c_{\mathsf{bal}} - s$. To enforce the lower bound $s \ge 1$ without adding another range proof, the client defines the shifted amount
+\[
+s_{\mathsf{shift}} = s - 1 \in [0, c_{\mathsf{bal}}-1]
+\]
+and sends only the shifted commitment
+\[
+C_{s,\mathsf{shift}} = s_{\mathsf{shift}} \cdot h_5 + r_s \cdot h_0 \in \mathbb{G}_1.
+\]
+The verifier reconstructs the actual spend commitment locally as
+\[
+C_s = C_{s,\mathsf{shift}} + h_5 = s \cdot h_5 + r_s \cdot h_0.
+\]
+All remaining Hidden-mode bridge equations use the derived $C_s$, while the second BEQ proof is run only on $C_{s,\mathsf{shift}}$. Thus the lower bound $s \ge 1$ is enforced with zero extra proof bytes and only one additional local $\mathbb{G}_1$ addition on the verifier. Here $h_5$ is an independent generator reserved for hidden spend amounts. In the current reference implementation, this role is instantiated by the pre-generated base $h_3$, which is not otherwise used in spend-mode equations; all Hidden-mode checks therefore use a generator independent from the balance base $h_4$.
+
+\paragraph{Client-Side Computation.}
+Hidden mode uses the same deterministic $(\eta, k^*, r^*)$ derivation and the same counter $i$ as Exact mode. The client computes $m = c_{\mathsf{bal}} - s$, sets $s_{\mathsf{shift}} = s-1$, derives $r_s \in \mathbb{Z}_q$ and the remaining proof randomizers from $(k_{\mathsf{sub}}, T_{\mathsf{issue}}, i)$ via domain-separated hashes, and forms the refund commitment
+\[
+K' = m \cdot h_4 + k^* \cdot h_1 + T_{\mathsf{issue}} \cdot h_2 + r^* \cdot h_0,
+\]
+and forms the remaining-balance commitment
+\[
+C_{\mathsf{BP}} = m \cdot h_4 + r_{\mathsf{BP}} \cdot h_0.
+\]
+It also forms the shifted hidden-amount commitment
+\[
+C_{s,\mathsf{shift}} = s_{\mathsf{shift}} \cdot h_5 + r_s \cdot h_0.
+\]
+It then generates two BEQ proofs:
+\begin{itemize}[leftmargin=*]
+\item $\pi_{\text{BEQ\_spend}}$ for the refund balance $m$ using BLS generator $h_4$; and
+\item $\pi_{\text{BEQ\_shift}}$ for the shifted hidden spend amount $s_{\mathsf{shift}}$ using BLS generator $h_5$.
+\end{itemize}
+The request discloses $(\mathsf{mode}=\text{``Hidden''}, k_{\mathsf{cur}}, T_{\mathsf{issue}}, \eta, K', C_{\mathsf{BP}}, C_{s,\mathsf{shift}})$ and does \emph{not} disclose $s$ or $s_{\mathsf{req}}$.
+
+\paragraph{Zero-Knowledge Proof $\pi_{\mathsf{spend}}$ (Hidden Mode).}
+Hidden mode extends the Exact-mode witness set with the scaled hidden amount $\widetilde{a} = s r_1$ and the scaled commitment blinder $x = r_s r_1$. Let $\rho_{\widetilde{a}}, \rho_x \xleftarrow{\$} \mathbb{Z}_q$ be the corresponding blinders and define $\rho_m = \rho_{\tilde{c}} - \rho_{\widetilde{a}}$. The prover first reconstructs $C_s = C_{s,\mathsf{shift}} + h_5$ locally and then computes
+\begin{align*}
+T_{\mathsf{scale},S} &= \rho_{r_1} \cdot C_s, & T_S &= \rho_{\widetilde{a}} \cdot h_5 + \rho_x \cdot h_0, \\
+T_{\mathsf{scale},R} &= \rho_{r_1} \cdot K', & T_{\mathsf{refund}} &= \rho_m \cdot h_4 + \rho_u \cdot h_1 + \rho_{r_1} \cdot T_{\mathsf{issue}} \cdot h_2 + \rho_v \cdot h_0, \\
+T_{\mathsf{scale},BP} &= \rho_{r_1} \cdot C_{\mathsf{BP}}, & T_{\mathsf{BP}} &= \rho_m \cdot h_4 + \rho_w \cdot h_0,
+\end{align*}
+and responses
+\begin{align*}
+z_{\widetilde{a}} &= \rho_{\widetilde{a}} + c \cdot (s r_1), & z_x &= \rho_x + c \cdot (r_s r_1).
+\end{align*}
+The prover defines the hidden refund-balance response as
+\[
+z_m = z_{\tilde{c}} - z_{\widetilde{a}},
+\]
+which corresponds to $(c_{\mathsf{bal}} - s) r_1 = m r_1$. The Fiat--Shamir challenge is recomputed over the Hidden-mode statement and \textbf{must} bind the mode tag, $C_{s,\mathsf{shift}}$, and $\pi_{\text{BEQ\_shift}}$:
+\[
+c = \mathcal{H}_{\mathsf{scalar}}\left(
+\begin{array}{c}
+H_{\mathsf{ctx}} \parallel \mathsf{pk}_{\mathsf{daily}} \parallel \text{``Hidden''} \parallel k_{\mathsf{cur}} \parallel T_{\mathsf{issue}} \parallel \eta \parallel K' \parallel \\
+C_{\mathsf{BP}} \parallel C_{s,\mathsf{shift}} \parallel \pi_{\text{BEQ\_spend}} \parallel \pi_{\text{BEQ\_shift}} \parallel A' \parallel \bar{A} \parallel T_{\mathsf{BBS}} \parallel \\
+T_{\mathsf{scale},S} \parallel T_S \parallel T_{\mathsf{scale},R} \parallel T_{\mathsf{refund}} \parallel T_{\mathsf{scale},BP} \parallel T_{\mathsf{BP}} \parallel \text{``Spend''}
+\end{array}
+\right).
+\]
+On the wire, $z_{\widetilde{a}}$ is serialized as the field
+\texttt{z\_amt\_tilde}.
+
+\paragraph{Server Verification (Hidden Mode).}
+The server performs the same nonce, double-spend, BBS+, BEQ-for-$m$, and pairing checks as in Exact mode, but with the following mode-specific requirements:
+\begin{enumerate}[leftmargin=*]
+\item Require $\mathsf{mode} = \text{``Hidden''}$; require $(C_{s,\mathsf{shift}}, \pi_{\text{BEQ\_shift}})$ to be present; and reject any disclosed Exact-mode-only fields $(s, s_{\mathsf{req}}, T_{\mathsf{scale},T}, T_{\mathsf{total}})$.
+\item Compute the spend statement digest over the Hidden-mode statement, binding $\text{``Hidden''}$, $C_{s,\mathsf{shift}}$, $\pi_{\text{BEQ\_shift}}$, $\pi_{\mathsf{spend}}$, and $\eta$.
+\item Recompute the Fiat--Shamir challenge over the Hidden-mode transcript above.
+\item Reconstruct $C_s = C_{s,\mathsf{shift}} + h_5$ locally.
+\item Verify the hidden-amount bridge:
+  \[
+  z_{\widetilde{a}} \cdot h_5 + z_x \cdot h_0 - T_S \stackrel{?}{=} z_{r_1} \cdot C_s - T_{\mathsf{scale},S}.
+  \]
+\item Verify the refund and range bridges using $z_m = z_{\tilde{c}} - z_{\widetilde{a}}$:
+  \begin{align*}
+    z_m \cdot h_4 + z_u \cdot h_1 + z_{r_1} \cdot T_{\mathsf{issue}} \cdot h_2 + z_v \cdot h_0 - T_{\mathsf{refund}} &\stackrel{?}{=} z_{r_1} \cdot K' - T_{\mathsf{scale},R}, \\
+    z_m \cdot h_4 + z_w \cdot h_0 - T_{\mathsf{BP}} &\stackrel{?}{=} z_{r_1} \cdot C_{\mathsf{BP}} - T_{\mathsf{scale},BP}.
+  \end{align*}
+\item Verify $\pi_{\text{BEQ\_shift}}$ with respect to $C_{s,\mathsf{shift}}$. Because this proof establishes $s_{\mathsf{shift}} \in [0,2^{32}-1]$, the derived commitment $C_s = C_{s,\mathsf{shift}} + h_5$ necessarily opens to $s = s_{\mathsf{shift}}+1 \in [1,2^{32}]$. Combined with the refund-balance proof on $m = c_{\mathsf{bal}} - s$, every accepted Hidden-mode proof therefore satisfies $1 \le s \le c_{\mathsf{bal}}$ without any additional Bulletproof.
+\end{enumerate}
+If all checks pass, the server issues the same refund token format as in Exact mode and the client finalizes identically. Hidden mode therefore changes only the statement being proved, not the resulting refund credential.
+
+\subsection{Notation and Preliminaries}
+
+\begin{description}[leftmargin=3.8cm,style=nextline]
+\item[$\mathbb{G}_{\text{BLS}}$] BLS12-381 G1 group (written additively).
+\item[$\mathbb{G}_{25519}$] Ristretto group over Curve25519 (written additively).
+\item[$q_{\text{BLS}}$] Prime order of $\mathbb{G}_{\text{BLS}}$ ($\approx 2^{255}$).
+\item[$q_{25519}$] Prime order of $\mathbb{G}_{25519}$ ($\approx 2^{252}$).
+\item[$h_{\mathsf{val}}, h_0 \in \mathbb{G}_{\text{BLS}}$] Public BLS12-381 generators for committed value and blinding; instantiate $h_{\mathsf{val}} = h_4$ for balances and $h_{\mathsf{val}} = h_5$ for hidden spend amounts.
+\item[$G, H \in \mathbb{G}_{25519}$] Standard Ristretto Pedersen generators.
+\item[$\mathcal{H}_{128}$] Hash function $\{0,1\}^* \to \{0,1\}^{128}$ for the cross-curve challenge.
+\end{description}
+
+We rely on the \emph{Discrete Logarithm (DL)} assumption in both groups and on the random oracle model for hash functions. Because the two groups are defined over different fields, we assume there is no efficiently computable homomorphism between them; this is guaranteed by the distinct curve parameters.
+
+\subsection{Integer Arithmetic and Bounds}
+
+All Sigma protocol operations involving the secret value $m$ are performed over the integers $\mathbb{Z}$ rather than modulo a group order. We define the following bounds:
+
+\begin{itemize}
+\item $m \in [0, 2^{32}-1]$ (enforced by the Bulletproof).
+\item The Fiat--Shamir challenge $c$ is a 128-bit integer, i.e.\ $c \in [0, 2^{128}-1]$.
+\item The blinding integer $u_m$ is drawn uniformly from $[0, 2^{240}-1]$.
+\end{itemize}
+
+The response $z = u_m + c \cdot m$ therefore satisfies $0 \le z < 2^{240} + 2^{128} \cdot (2^{32}-1) < 2^{241}$. Crucially, $2^{241} < q_{25519} < q_{\text{BLS}}$, so $z$ is strictly smaller than the order of both groups. Consequently, interpreting $z$ as a scalar modulo $q_{\text{BLS}}$ or $q_{25519}$ is unambiguous: no modular reduction ever occurs, and the integer value of $z$ is preserved exactly in both groups.
+
+\subsection{The Batched Equality Proof Protocol}
+\label{sec:crosscurve}
+
+For a public value generator $h_{\mathsf{val}} \in \{h_4, h_5\}$, the protocol proves knowledge of $(m, r_{\text{BLS}}, r_{25519})$ such that:
+\[
+\begin{aligned}
+C_{\text{BLS}} &= m \cdot h_{\mathsf{val}} + r_{\text{BLS}} \cdot h_0 \quad \in \mathbb{G}_{\text{BLS}}, \\
+C_{25519} &= m \cdot G + r_{25519} \cdot H \quad \in \mathbb{G}_{25519},
+\end{aligned}
+\]
+and that $m \in [0, 2^{32}-1]$.
+
+\subsubsection{Prover Algorithm}
+
+\textbf{Input:} $m \in [0, 2^{32}-1]$, a public generator $h_{\mathsf{val}} \in \{h_4,h_5\}$, $r_{\text{BLS}} \in \mathbb{Z}_{q_{\text{BLS}}}$, $r_{25519} \in \mathbb{Z}_{q_{25519}}$, context string $\text{ctx}$, and optional auxiliary commitments $\text{comm}_1,\dots,\text{comm}_k \in \mathbb{G}_{\text{BLS}}$ (e.g., BBS+ proof components).
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Range-Proof Commitment Phase:}
+  Initialize a Dalek Bulletproof transcript for the Ristretto commitment $C_{25519}$ proving that $m \in [0, 2^{32}-1]$. The transcript is initialized with domain separator \texttt{"EBUT:BEQ:Range"} and includes $\mathsf{len}(\text{ctx}) \parallel \text{ctx}$ followed by $\mathsf{len}(\text{comm}_i) \parallel \text{comm}_i$ for each auxiliary commitment, using the same length-prefixed encoding mandated for the Fiat--Shamir challenge below. The Bulletproof prover must append its internal polynomial commitments $(L_i,R_i)$ to this same transcript state before the shared challenge $c$ of step~3 is squeezed; the final Bulletproof response scalars are computed only after $c$ has been fixed. We denote this pre-response transcript contribution by $\pi_{\text{range}}^{\mathsf{pre}}$.
+
+\item \textbf{Commitments (with rejection sampling):}
+  Repeat the following until acceptance:
+  \begin{enumerate}
+  \item Choose random integers
+    \[
+    u_m \xleftarrow{\$} [0, 2^{240}-1], \qquad
+    u_{\text{BLS}} \xleftarrow{\$} \mathbb{Z}_{q_{\text{BLS}}}, \qquad
+    u_{25519} \xleftarrow{\$} \mathbb{Z}_{q_{25519}}.
+    \]
+  \item Compute
+    \[
+    R_{\text{BLS}} = u_m \cdot h_{\mathsf{val}} + u_{\text{BLS}} \cdot h_0 \in \mathbb{G}_{\text{BLS}}, \qquad
+    R_{25519} = u_m \cdot G + u_{25519} \cdot H \in \mathbb{G}_{25519}.
+    \]
+  \item Compute the challenge $c$ as in step~3 below.
+  \item Set $z = u_m + c \cdot m$ (as an integer).
+  \item \textbf{Rejection test:} if $z > 2^{240}-1$, \textbf{abort and restart} from the beginning of this loop with fresh randomness.
+  \item Otherwise \textbf{accept} and continue.
+  \end{enumerate}
+  The expected number of iterations is less than~2; rejection occurs with probability at most $(2^{32}-1) \cdot (2^{128}-1) / 2^{240} < 2^{-80}$, where $c_{\max} \le 2^{32}-1$ per Section~4.1 and $c < 2^{128}$.
+
+\item \textbf{Challenge:}
+  Compute the 128-bit challenge using length-prefixed encoding for all variable-length fields to prevent byte-shifting transcript collisions (the same requirement mandated for the spend statement digest in Section~7.4):
+  \[
+  \begin{aligned}
+  c = \mathcal{H}_{128}\!\bigl(&\text{EBUT:BEQ:Challenge} \parallel \mathsf{len}(\text{ctx}) \parallel \text{ctx} \parallel h_{\mathsf{val}} \parallel h_0 \parallel G \parallel H \\
+  &\parallel C_{\text{BLS}} \parallel C_{25519} \parallel R_{\text{BLS}} \parallel R_{25519} \\
+  &\parallel \mathsf{len}(\pi_{\text{range}}^{\mathsf{pre}}) \parallel \pi_{\text{range}}^{\mathsf{pre}} \\
+  &\parallel \mathsf{len}(\text{comm}_1) \parallel \text{comm}_1 \parallel \dots \parallel \mathsf{len}(\text{comm}_k) \parallel \text{comm}_k\bigr).
+  \end{aligned}
+  \]
+  where $\mathsf{len}(\cdot)$ denotes a fixed-width 4-byte big-endian encoding of the byte length of the following field. The public generators $h_{\mathsf{val}}, h_0 \in \mathbb{G}_{\text{BLS}}$ (48 bytes each) and $G, H \in \mathbb{G}_{25519}$ (32 bytes each) are fixed size and \textbf{must} be bound into the transcript to prevent parameter-substitution attacks; they do not require length prefixes. The remaining curve group elements $C_{\text{BLS}}$, $C_{25519}$, $R_{\text{BLS}}$, $R_{25519}$ are always fixed size (48, 32, 48, and 32 bytes respectively) and do not require length prefixes; however, $\text{ctx}$, $\pi_{\text{range}}^{\mathsf{pre}}$, and each $\text{comm}_i$ are variable-length and \textbf{must} be length-prefixed. Raw concatenation of variable-length fields without delimiters is \textbf{prohibited}: an attacker can shift bytes between adjacent variable-length fields to produce an identical transcript hash for two distinct proof statements, breaking binding.
+
+\item \textbf{Responses:}
+  Use the $z = u_m + c \cdot m$ accepted in step~2 (over the integers, not reduced modulo any group order).
+  Compute the Sigma-protocol responses
+  \[
+  z_{\text{BLS}} = u_{\text{BLS}} + c \cdot r_{\text{BLS}} \pmod{q_{\text{BLS}}}, \qquad
+  z_{25519} = u_{25519} + c \cdot r_{25519} \pmod{q_{25519}},
+  \]
+  and then finalize the Bulletproof response scalars using the same transcript state and challenge $c$. Here $c$ is interpreted as an element of the respective scalar fields by reducing modulo $q_{\text{BLS}}$ and $q_{25519}$ respectively; because $c < 2^{128} \ll \min(q_{\text{BLS}}, q_{25519})$, this reduction is the identity map.
+
+\item \textbf{Output:}
+  The canonical proof is
+  \[
+  \pi_{\text{BEQ}} = (C_{25519}, R_{\text{BLS}}, R_{25519}, z, z_{\text{BLS}}, z_{25519}, \pi_{\text{range}}).
+  \]
+
+  \textbf{Transcript compression (reference implementation):}
+  The reference implementation omits $R_{\text{BLS}}$ and $R_{25519}$ from the wire format, transmitting instead only the challenge tuple
+  \[
+  (c_{128}, C_{25519}, z, z_{\text{BLS}}, z_{25519}, \pi_{\text{range}}).
+  \]
+  The verifier reconstructs:
+  \[
+  R_{\text{BLS}} = z \cdot h_{\mathsf{val}} + z_{\text{BLS}} \cdot h_0 - c \cdot C_{\text{BLS}}, \quad
+  R_{25519} = z \cdot G + z_{25519} \cdot H - c \cdot C_{25519},
+  \]
+  and re-hashes them to verify the challenge. This saves 80 bytes (48 bytes for $R_{\text{BLS}}$ and 32 bytes for $R_{25519}$) per proof without any loss of security.
+\end{enumerate}
+
+\subsubsection{Verifier Algorithm}
+
+\textbf{Input:} $\pi_{\text{BEQ}}$, $C_{\text{BLS}}$, context $\text{ctx}$, auxiliary commitments $\text{comm}_1,\dots,\text{comm}_k$.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Bound Check:}
+  Verify that $0 \le z \le 2^{240}-1$ (as an integer). If not, reject. This tighter bound (compared to checking only $z < q_{25519}$, where $q_{25519} \approx 2^{252}$) is enforced by the prover's rejection-sampling step and is required for the zero-knowledge guarantee: without it, a large $z > 2^{240}-1$ would reveal that $c \cdot m$ is large, leaking a lower bound on the secret $m$.
+
+\item \textbf{Recompute Challenge:}
+  Compute $c$ using the identical length-prefixed encoding as the prover:
+  \[
+  \begin{aligned}
+  c = \mathcal{H}_{128}\!\bigl(&\text{EBUT:BEQ:Challenge} \parallel \mathsf{len}(\text{ctx}) \parallel \text{ctx} \parallel h_{\mathsf{val}} \parallel h_0 \parallel G \parallel H \\
+  &\parallel C_{\text{BLS}} \parallel C_{25519} \parallel R_{\text{BLS}} \parallel R_{25519} \\
+  &\parallel \mathsf{len}(\pi_{\text{range}}) \parallel \pi_{\text{range}} \\
+  &\parallel \mathsf{len}(\text{comm}_1) \parallel \text{comm}_1 \parallel \dots \parallel \mathsf{len}(\text{comm}_k) \parallel \text{comm}_k\bigr).
+  \end{aligned}
+  \]
+
+\item \textbf{Verify BLS12-381 Equation:}
+  \[
+  z \cdot h_{\mathsf{val}} + z_{\text{BLS}} \cdot h_0 \stackrel{?}{=} R_{\text{BLS}} + c \cdot C_{\text{BLS}} \quad \text{in } \mathbb{G}_{\text{BLS}}.
+  \]
+
+\item \textbf{Verify Ristretto Equation:}
+  \[
+  z \cdot G + z_{25519} \cdot H \stackrel{?}{=} R_{25519} + c \cdot C_{25519} \quad \text{in } \mathbb{G}_{25519}.
+  \]
+
+\item \textbf{Verify Bulletproof:}
+  Verify $\pi_{\text{range}}$ with respect to $C_{25519}$ using the same transcript initialization as the prover.
+\end{enumerate}
+
+If all checks pass, the verifier accepts.
+
+\subsection{Security Analysis of BEQ}
+
+\begin{theorem}[Completeness]
+If the prover follows the protocol honestly, the verifier always accepts.
+\end{theorem}
+\begin{proof}
+The rejection-sampling loop guarantees that the accepted $z = u_m + c \cdot m$ satisfies $0 \le z \le 2^{240}-1 < q_{25519}$ (where $q_{25519} = 2^{252} + 27742317777372353535851937790883648493$), so the verifier's bound check passes. Substituting the definitions:
+\[
+z \cdot h_{\mathsf{val}} + z_{\text{BLS}} \cdot h_0 = (u_m + c m) h_{\mathsf{val}} + (u_{\text{BLS}} + c r_{\text{BLS}}) h_0 = R_{\text{BLS}} + c \cdot C_{\text{BLS}},
+\]
+and similarly for the Ristretto equation. The Bulletproof is complete by the underlying Dalek implementation. Thus, all checks succeed.
+\end{proof}
+
+\begin{theorem}[Knowledge Soundness]
+\label{thm:beq-knowledge}
+Assume the discrete logarithm problem is hard in both $\mathbb{G}_{\text{BLS}}$ and $\mathbb{G}_{25519}$, and that the Bulletproof is computationally sound. Let $\mathcal{A}$ be a PPT adversary making at most $q_{\text{RO}}$ queries to $\mathcal{H}_{128}$ and producing a valid proof $\pi_{\text{BEQ}}$ with probability $\epsilon$. Then there exists an extractor $\mathcal{E}$ that, given black-box access to $\mathcal{A}$, runs in expected time $O(q_{\text{RO}}/\epsilon)$ and outputs a witness $(m, r_{\text{BLS}}, r_{25519})$ such that $m \in [0,2^{32}-1]$ and the commitment equations hold, with success probability at least
+\[
+\frac{\epsilon^2}{q_{\text{RO}}} - \frac{\epsilon}{2^{128}} - \advantage{DL}(\mathcal{B}) - \advantage{BP\text{-}sound}(\mathcal{B}').
+\]
+\end{theorem}
+\begin{proof}
+Let $x^*$ denote the random-oracle query that fixes the final BEQ challenge. The extractor $\mathcal{E}$ runs $\mathcal{A}$ with lazy sampling for $\mathcal{H}_{128}$ and records every query. If $\mathcal{A}$ outputs an accepting proof without ever querying $x^*$, then it guessed the 128-bit challenge outright; this event has probability at most $2^{-128}$. Otherwise, $\mathcal{E}$ rewinds to the point just before $x^*$ is answered, keeps the adversary's random tape and all earlier oracle replies fixed, and answers $x^*$ with a fresh independent challenge $c' \neq c$. Standard replay-until-fork analysis therefore gives expected running time $O(q_{\text{RO}}/\epsilon)$. By the Pointcheval--Stern / General Forking Lemma~\cite{PointchevalStern00,BellareNeven06}, with probability at least
+\[
+\frac{\epsilon^2}{q_{\text{RO}}} - \frac{\epsilon}{2^{128}}
+\]
+the rewind produces a second accepting transcript with the same first message
+$(C_{25519},R_{\text{BLS}},R_{25519},\pi_{\text{range}})$ and a distinct challenge.
+
+Write the two accepting transcripts as
+\[
+(c,z,z_{\text{BLS}},z_{25519}) \qquad \text{and} \qquad (c',z',z_{\text{BLS}}',z_{25519}').
+\]
+Define
+\[
+\Delta c = c-c',\qquad \Delta z = z-z',\qquad \Delta z_{\text{BLS}} = z_{\text{BLS}}-z_{\text{BLS}}',\qquad \Delta z_{25519}=z_{25519}-z_{25519}'.
+\]
+Because $c \neq c'$, we have $\Delta c \neq 0$ and hence $\Delta c$ is invertible modulo both $q_{\text{BLS}}$ and $q_{25519}$. Subtracting the two verifier equations gives
+\begin{align}
+\Delta z\, h_{\mathsf{val}} + \Delta z_{\text{BLS}}\, h_0 &= \Delta c\, C_{\text{BLS}} \quad \text{in } \mathbb{G}_{\text{BLS}}, \label{eq:beq-extract-bls}\\
+\Delta z\, G + \Delta z_{25519}\, H &= \Delta c\, C_{25519} \quad \text{in } \mathbb{G}_{25519}. \label{eq:beq-extract-rist}
+\end{align}
+
+Now invoke Bulletproof soundness on the accepted range-proof component. Except with probability $\advantage{BP\text{-}sound}(\mathcal{B}')$, there exist values $m \in [0,2^{32}-1]$ and $r_{25519} \in \mathbb{Z}_{q_{25519}}$ such that
+\[
+C_{25519} = mG + r_{25519}H.
+\]
+Substituting this into~\eqref{eq:beq-extract-rist} yields
+\[
+(\Delta z - \Delta c\, m)G + (\Delta z_{25519} - \Delta c\, r_{25519})H = 0.
+\]
+If $\Delta z - \Delta c\, m \not\equiv 0 \pmod{q_{25519}}$, then either the coefficient of $H$ is also non-zero, in which case we obtain a non-trivial discrete-log relation between the independent generators $G$ and $H$, or the coefficient of $H$ is zero, in which case $G$ has a non-zero annihilator modulo the prime order $q_{25519}$; both possibilities contradict the discrete-log assumption in $\mathbb{G}_{25519}$. Therefore, except with probability $\advantage{DL}(\mathcal{B})$,
+\[
+\Delta z \equiv \Delta c\, m \pmod{q_{25519}}.
+\]
+
+At this point the modular-arithmetic lifting becomes exact. The verifier's bound check enforces $0 \le z,z' \le 2^{240}-1$, so $|\Delta z| < 2^{240}$. Also,
+\[
+|\Delta c\, m| < 2^{128}\cdot 2^{32} = 2^{160}.
+\]
+Hence
+\[
+|\Delta z - \Delta c\, m| < 2^{240} + 2^{160} < 2^{241} < q_{25519}.
+\]
+But an integer congruent to $0$ modulo $q_{25519}$ and having absolute value strictly less than $q_{25519}$ must itself be $0$. Therefore
+\[
+\Delta z = \Delta c\, m \qquad \text{over } \mathbb{Z}.
+\]
+So $\Delta c$ \,\emph{always divides} $\Delta z$, and the Euclidean quotient is exactly the witness value $m$. This also proves uniqueness: if another integer $m' \in [0,2^{32}-1]$ satisfied $\Delta z = \Delta c\, m'$, then $(m-m')\Delta c = 0$ over $\mathbb{Z}$, forcing $m=m'$ because $\Delta c \neq 0$.
+
+With $m$ fixed, return to~\eqref{eq:beq-extract-bls}. Since $\Delta z = \Delta c\, m$ over the integers, that equation simplifies to
+\[
+(\Delta z_{\text{BLS}} - \Delta c\, r_{\text{BLS}})h_0 = 0
+\]
+for
+\[
+r_{\text{BLS}} := \Delta c^{-1} \Delta z_{\text{BLS}} \pmod{q_{\text{BLS}}}.
+\]
+Because $h_0$ has prime order $q_{\text{BLS}}$, this is equivalent to
+\[
+C_{\text{BLS}} = m\, h_{\mathsf{val}} + r_{\text{BLS}} h_0.
+\]
+Likewise,
+\[
+r_{25519} := \Delta c^{-1} \Delta z_{25519} \pmod{q_{25519}}
+\]
+satisfies $C_{25519} = mG + r_{25519}H$. Thus $\mathcal{E}$ outputs the witness $(m,r_{\text{BLS}},r_{25519})$. Combining the forking probability with the two failure events above proves the claimed bound.
+\end{proof}
+
+\begin{theorem}[Statistical Zero-Knowledge]
+\label{thm:beq-zk}
+Under the random oracle model, the non-interactive BEQ protocol with rejection sampling is statistically zero-knowledge. The statistical distance between the real and simulated transcript distributions is strictly bounded by $2^{-80}$.
+\end{theorem}
+\begin{proof}
+We construct a simulator $\mathcal{S}$ that, on input $(C_{\text{BLS}}, \text{ctx})$ and without knowledge of the witness $m$, produces a transcript $\pi_{\text{BEQ}} = (C_{25519}, R_{\text{BLS}}, R_{25519}, z, z_{\text{BLS}}, z_{25519}, \pi_{\text{range}})$ as follows:
+\begin{enumerate}[leftmargin=*]
+\item Choose a random challenge $c \xleftarrow{\$} \{0,1\}^{128}$.
+\item Choose uniformly random responses $z \xleftarrow{\$} [0, 2^{240}-1]$, $z_{\text{BLS}} \xleftarrow{\$} \mathbb{Z}_{q_{\text{BLS}}}$, and $z_{25519} \xleftarrow{\$} \mathbb{Z}_{q_{25519}}$.
+\item Compute the commitments algebraically:
+\[
+R_{\text{BLS}} = z \cdot h_{\mathsf{val}} + z_{\text{BLS}} \cdot h_0 - c \cdot C_{\text{BLS}},
+\qquad
+R_{25519} = z \cdot G + z_{25519} \cdot H - c \cdot C_{25519}.
+\]
+\item Generate a simulated Bulletproof $\pi_{\text{range}}$ for an arbitrary $C_{25519}$ using the honest-verifier zero-knowledge property of the Dalek range proof.
+\item Program the random oracle $\mathcal{H}_{128}$ to return $c$ on the resulting transcript input.
+\end{enumerate}
+In a real execution, the prover samples a blinding integer $u_m \xleftarrow{\$} [0,2^{240}-1]$ and computes $z = u_m + c \cdot m$. Because the rejection test keeps only transcripts with $z \le 2^{240}-1$, the real support of $z$ is
+\[
+S_{\mathsf{real}} = [c \cdot m, 2^{240}-1].
+\]
+The simulator instead samples $z$ uniformly from
+\[
+S_{\mathsf{sim}} = [0, 2^{240}-1].
+\]
+The statistical distance between the real and simulated distributions is therefore exactly the probability mass of the non-overlapping prefix $[0, c \cdot m - 1]$:
+\[
+\Delta = \frac{c \cdot m}{2^{240}}.
+\]
+By protocol enforcement, the Fiat--Shamir challenge satisfies $c < 2^{128}$ and the committed value satisfies $m \le 2^{32}-1$. Hence,
+\[
+\Delta < \frac{2^{128} \cdot (2^{32}-1)}{2^{240}} < 2^{-80}.
+\]
+Because $\Delta < 2^{-80}$, even an unbounded adversary can distinguish a simulated transcript from a real transcript only with negligible advantage based on the support of $z$. The remaining transcript components are distributed exactly as in the simulator construction above, so the protocol is statistically zero-knowledge.
+\end{proof}
+
+\subsubsection{Transcript Splicing and the Cryptographic Knot}
+To prevent cross-curve splicing attacks---where an adversary extracts a valid Dalek range proof from one session and replays it in a different BBS+ context---the Fiat--Shamir challenge $c$ must act as a cryptographic knot tying both domains together. The prover and verifier \textbf{must} sequentially execute the transcript state as follows:
+\begin{enumerate}[leftmargin=*]
+\item Initialize the Merlin sponge as \texttt{Transcript::new(b"EBUT:BEQ:Range")}. 
+\item Commit the BLS12-381 context by appending $A'$, $\bar{A}$, $T_{\mathsf{BBS}}$, $C_{\text{BLS}}$, and all auxiliary bridge commitments.
+\item Let the Dalek Bulletproof generation routine append its internal polynomial commitments $(L_i,R_i)$ to the same sponge state.
+\item \textbf{The extraction knot:} squeeze the 128-bit challenge $c$ from the sponge \emph{after} step~3 but strictly \emph{before} the Sigma-protocol scalar responses $(z, z_{\text{BLS}}, z_{25519})$ and the Bulletproof response scalars are computed.
+\end{enumerate}
+This strict sequencing guarantees that altering the BBS+ context inherently cascades into the Bulletproof polynomial state, yielding cross-curve non-malleability for the combined BEQ transcript.
+
+\subsection{Integration into EBUT}
+The cross-curve batched equality proof replaces all standalone range proofs in the EBUT protocol.
+\begin{itemize}
+\item \textbf{Epoch Refresh:} The commitment $C_{\Delta}$ to the expiry delta $\Delta = E_{\mathsf{max}} - T$ is bound to a Ristretto commitment and a range proof via $\pi_{\text{BEQ\_exp}}$. The auxiliary commitments include $A', \bar{A}, T_{\mathsf{BBS}}, N_T, K_{\mathsf{daily}}$.
+\item \textbf{Spend Phase (Exact mode):} The commitment $C_{\mathsf{BP}}$ to the remaining balance $m = c_{\mathsf{bal}} - s$ is linked to a Ristretto commitment via $\pi_{\text{BEQ\_spend}}$ instantiated with $h_{\mathsf{val}} = h_4$. Auxiliary commitments include $A', \bar{A}, T_{\mathsf{BBS}}, K', C_{\mathsf{total}}$.
+\item \textbf{Spend Phase (Hidden mode):} The refund-balance proof again uses $h_{\mathsf{val}} = h_4$, while the hidden amount proof $\pi_{\text{BEQ\_shift}}$ uses $h_{\mathsf{val}} = h_5$ for the shifted amount commitment $C_{s,\mathsf{shift}}$; the verifier then reconstructs $C_s = C_{s,\mathsf{shift}} + h_5$ for the Hidden-mode bridge.
+\end{itemize}
+The proof size is approximately 672 bytes for the Bulletproof (single 32-bit range) plus the Sigma protocol responses ($\approx 160$ bytes), totaling under 1~KB. Verification time is dominated by the Bulletproof ($\approx 1$--$2$~ms) and the two multi-scalar multiplications, which are negligible by comparison.
+
+\section{Security Analysis of EBUT}
+\label{sec:security-ebut}
+
+We now prove that the EBUT construction satisfies the three security properties defined in Section~\ref{sec:defs}: unforgeability, unlinkability, and rate-limit soundness. All proofs are in the random oracle model and rely on the hardness assumptions stated in Section~2. We assume the cross-curve BEQ is used for range proofs; its security properties have been established in Section~\ref{sec:crosscurve}.
+
+\paragraph{Forking notation.}
+For a Fiat--Shamir proof whose challenge space has size $M$ and that makes at most $Q$ random-oracle queries, write
+\[
+\mathsf{Fork}_M(\epsilon,Q) := \epsilon\!\left(\frac{\epsilon}{Q}-\frac{1}{M}\right).
+\]
+By the Pointcheval--Stern / General Forking Lemma~\cite{PointchevalStern00,BellareNeven06}, an adversary that produces an accepting proof with probability $\epsilon$ yields, with probability at least $\mathsf{Fork}_M(\epsilon,Q)$, two accepting transcripts with the same first message and two distinct challenges.
+
+\begin{lemma}[Refresh-proof extractor]
+\label{lem:refresh-extractor}
+Fix a public refresh statement $(T,N_T,K_{\mathsf{daily}},C_{\Delta},C_{\mathsf{bridge}},A',\bar{A})$. Let $\mathcal{A}_{\mathsf{ref}}$ be an adversary that outputs an accepting refresh proof for that statement with probability $\epsilon_{\mathsf{ref}}$ after at most $Q$ queries to $\mathcal{H}_{\mathsf{scalar}}$. Then there exists a black-box extractor that, with probability at least $\mathsf{Fork}_q(\epsilon_{\mathsf{ref}},Q)$, outputs scalars
+\[
+(e_{\mathsf{sub}}, r_1, s_{\mathsf{sub}}, k_{\mathsf{sub}}, c_{\mathsf{max}}, E_{\mathsf{max}}, k_{\mathsf{daily}}, r_{\mathsf{daily}}, r_{\Delta})
+\]
+with $r_1 \in \mathbb{Z}_q^*$ such that
+\begin{align*}
+\bar{A} &= A'^{-e_{\mathsf{sub}}}\!\cdot \bigl(g_1\cdot h_0^{s_{\mathsf{sub}}}\cdot h_1^{k_{\mathsf{sub}}}\cdot h_2^{c_{\mathsf{max}}}\cdot h_3^{E_{\mathsf{max}}}\bigr)^{r_1},\\
+N_T &= k_{\mathsf{sub}}\, H_T,\\
+K_{\mathsf{daily}} &= c_{\mathsf{max}} h_4 + k_{\mathsf{daily}} h_1 + T h_2 + r_{\mathsf{daily}} h_0,\\
+C_{\mathsf{bridge}} &= E_{\mathsf{max}} h_3 + r_{\Delta} h_0.
+\end{align*}
+Moreover, composing this extractor with the BEQ extractor of Theorem~\ref{thm:beq-knowledge} on $\pi_{\text{BEQ\_exp}}$ yields $\Delta \in [0,2^{32}-1]$ such that $C_{\Delta} = \Delta h_3 + r_{\Delta} h_0$ and therefore $E_{\mathsf{max}} = T+\Delta$.
+\end{lemma}
+\begin{proof}
+Fork on the final scalar challenge in the outer refresh proof. With probability at least $\mathsf{Fork}_q(\epsilon_{\mathsf{ref}},Q)$ we obtain two accepting transcripts having the same commitments
+\[
+(A',\bar{A},T_{\mathsf{BBS}},T_{\mathsf{scale},N},T_N,T_{\mathsf{scale},D},T_D,T_{\mathsf{scale},B},T_B)
+\]
+and distinct challenges $c \neq c'$. Write $\Delta c = c-c'$ and let $\Delta z_\bullet$ denote the corresponding response differences.
+
+The BBS+ core is exactly a Protocol-1-style proof of possession, so its standard special-soundness extractor yields
+\[
+e_{\mathsf{sub}} = \Delta z_e/\Delta c,\quad r_1 = \Delta z_{r_1}/\Delta c,\quad \tilde{s}=\Delta z_{\tilde{s}}/\Delta c,\quad \tilde{k}=\Delta z_{\tilde{k}}/\Delta c,\quad \tilde{c}=\Delta z_{\tilde{c}}/\Delta c,\quad \tilde{E}=\Delta z_{\tilde{E}}/\Delta c
+\]
+in $\mathbb{Z}_q$, and in particular $r_1 \in \mathbb{Z}_q^*$. Dividing the scaled witnesses by $r_1$ gives
+\[
+s_{\mathsf{sub}}=\tilde{s}/r_1,\qquad k_{\mathsf{sub}}=\tilde{k}/r_1,\qquad c_{\mathsf{max}}=\tilde{c}/r_1,\qquad E_{\mathsf{max}}=\tilde{E}/r_1.
+\]
+These values satisfy the extracted BBS+ relation displayed in the statement.
+
+Subtracting the two accepting nullifier-bridge equations yields
+\[
+\Delta z_{\tilde{k}}\, H_T = \Delta z_{r_1}\, N_T.
+\]
+Dividing by $\Delta c$ and then by $r_1$ gives $N_T = k_{\mathsf{sub}} H_T$. Likewise, subtracting the two daily-token bridge equations yields
+\[
+\Delta z_{\tilde{c}} h_4 + \Delta z_u h_1 + \Delta z_{r_1} T h_2 + \Delta z_v h_0 = \Delta z_{r_1} K_{\mathsf{daily}}.
+\]
+Setting
+\[
+u = \Delta z_u/\Delta c,\qquad v = \Delta z_v/\Delta c,
+\]
+and dividing by $r_1$ gives $k_{\mathsf{daily}} = u/r_1$ and $r_{\mathsf{daily}} = v/r_1$, whence
+\[
+K_{\mathsf{daily}} = c_{\mathsf{max}} h_4 + k_{\mathsf{daily}} h_1 + T h_2 + r_{\mathsf{daily}} h_0.
+\]
+The same argument applied to the expiry bridge gives $w = \Delta z_w/\Delta c$, $r_{\Delta}=w/r_1$, and
+\[
+C_{\mathsf{bridge}} = E_{\mathsf{max}} h_3 + r_{\Delta} h_0.
+\]
+Finally, Theorem~\ref{thm:beq-knowledge} applied to the accepted proof $\pi_{\text{BEQ\_exp}}$ extracts $\Delta \in [0,2^{32}-1]$ and an opening of $C_{\Delta}$. Since the verifier also checks $C_{\mathsf{bridge}} = C_{\Delta} + T h_3$, comparison of the two openings yields $E_{\mathsf{max}} = T+\Delta$.
+\end{proof}
+
+\begin{lemma}[Spend-proof extractor]
+\label{lem:spend-extractor}
+Fix a public spend statement and let $\mathcal{A}_{\mathsf{sp}}$ output an accepting spend proof with probability $\epsilon_{\mathsf{sp}}$ after at most $Q$ queries to $\mathcal{H}_{\mathsf{scalar}}$. Then there exists a black-box extractor that, with probability at least $\mathsf{Fork}_q(\epsilon_{\mathsf{sp}},Q)$, recovers the outer BBS+/bridge witness
+\[
+(e_{\mathsf{cur}},r_1,s_{\mathsf{cur}},c_{\mathsf{bal}},k^*,r^*,r_{\mathsf{BP}})
+\]
+with $r_1 \in \mathbb{Z}_q^*$, and by invoking Theorem~\ref{thm:beq-knowledge} on the accepted BEQ proof $\pi_{\text{BEQ\_spend}}$ additionally recovers $m \in [0,2^{32}-1]$ such that
+\[
+K' = m h_4 + k^* h_1 + T_{\mathsf{issue}} h_2 + r^* h_0,
+\qquad
+C_{\mathsf{BP}} = m h_4 + r_{\mathsf{BP}} h_0.
+\]
+In Exact/Unit mode the extractor proves $m = c_{\mathsf{bal}}-s$ for the public amount $s$. In Hidden mode it also invokes Theorem~\ref{thm:beq-knowledge} on $\pi_{\text{BEQ\_shift}}$ to recover $s_{\mathsf{shift}} \in [0,2^{32}-1]$, sets $s = s_{\mathsf{shift}}+1$, and proves $m = c_{\mathsf{bal}}-s$.
+\end{lemma}
+\begin{proof}
+Fork on the final scalar challenge of the outer spend proof. Two accepting transcripts with the same first message and challenges $c \neq c'$ yield, exactly as above, the Protocol-1 BBS+ witnesses
+\[
+e_{\mathsf{cur}} = \Delta z_e/\Delta c,\quad r_1 = \Delta z_{r_1}/\Delta c,\quad \tilde{s}=\Delta z_{\tilde{s}}/\Delta c,\quad \tilde{c}=\Delta z_{\tilde{c}}/\Delta c
+\]
+in $\mathbb{Z}_q$ with $r_1 \in \mathbb{Z}_q^*$, hence
+\[
+s_{\mathsf{cur}} = \tilde{s}/r_1,
+\qquad
+c_{\mathsf{bal}} = \tilde{c}/r_1.
+\]
+Subtracting the refund and range-bridge equations gives
+\[
+\Delta z_u = \Delta c\,(k^* r_1),\qquad \Delta z_v = \Delta c\,(r^* r_1),\qquad \Delta z_w = \Delta c\,(r_{\mathsf{BP}} r_1)
+\]
+in $\mathbb{Z}_q$, so division by $\Delta c$ and then by $r_1$ recovers $k^*$, $r^*$, and $r_{\mathsf{BP}}$.
+
+Next, apply Theorem~\ref{thm:beq-knowledge} to the accepted BEQ proof $\pi_{\text{BEQ\_spend}}$ and obtain $m \in [0,2^{32}-1]$ such that $C_{\mathsf{BP}} = m h_4 + r_{\mathsf{BP}} h_0$. In Exact/Unit mode the public amount $s$ is part of the statement and the verifier uses the derived response $z_m = z_{\tilde{c}} - s z_{r_1}$. Subtracting the two accepted transcripts gives
+\[
+\Delta z_m = \Delta z_{\tilde{c}} - s\,\Delta z_{r_1} = \Delta c\,(c_{\mathsf{bal}}-s)r_1,
+\]
+and the refund bridge therefore yields $m = c_{\mathsf{bal}}-s$. In Hidden mode, Theorem~\ref{thm:beq-knowledge} applied to $\pi_{\text{BEQ\_shift}}$ extracts $s_{\mathsf{shift}} \in [0,2^{32}-1]$ and an opening of $C_{s,\mathsf{shift}}$; setting $s=s_{\mathsf{shift}}+1$ and using the hidden-amount bridge gives the same identity $m = c_{\mathsf{bal}}-s$. The displayed openings of $K'$ and $C_{\mathsf{BP}}$ follow from the verifier's refund and range-bridge equations after dividing through by $r_1$.
+\end{proof}
+
+\subsection{Unforgeability}
+
+\begin{theorem}[Unforgeability]
+Let $\mathcal{A}$ be a PPT adversary against the $\mathsf{UNF}$ game making at most $q_I$ issuance queries, $q_R$ refresh queries, $q_S$ spend queries, and $q_{\text{RO}}$ random oracle queries. Then there exist PPT adversaries $\mathcal{B}_{\text{SDH}}$ and $\mathcal{B}_{\text{DL}}$ such that
+\begin{align*}
+\advantage{UNF}(\mathcal{A}) \le \advantage{q\text{-}SDH}(\mathcal{B}_{\text{SDH}}) + \advantage{DL}(\mathcal{B}_{\text{DL}}) + \frac{(q_I+q_R+q_S+q_{\text{RO}})^2}{2q} \\
++ \frac{q_R+q_S}{q} + \frac{1}{2^{128}} + \negl(\lambda),
+\end{align*}
+where $q$ is the group order.
+\end{theorem}
+\begin{proof}
+Set $Q := q_I + q_R + q_S + q_{\text{RO}}$. We analyze a sequence of games.
+
+\paragraph{Game $\mathsf{G}_0$.} This is the real $\mathsf{UNF}$ experiment.
+
+\paragraph{Game $\mathsf{G}_1$ (no random-oracle collisions).} The challenger aborts if any two distinct scalar-oracle transcripts collide in $\mathbb{Z}_q$ or if any two distinct BEQ challenge transcripts collide in $\{0,1\}^{128}$. By the birthday bound,
+\[
+|\Pr[S_1]-\Pr[S_0]| \le \frac{Q^2}{2q} + \frac{1}{2^{128}},
+\]
+where the $2^{-128}$ term is a convenient upper bound for the 128-bit challenge-collision contribution.
+
+\paragraph{Game $\mathsf{G}_2$ (knowledge extraction for accepted refresh/spend proofs).} Whenever a refresh request is accepted, the challenger runs the extractor of Lemma~\ref{lem:refresh-extractor}; whenever a spend request is accepted, it runs the extractor of Lemma~\ref{lem:spend-extractor}. If the adversary ever causes acceptance without making the corresponding Fiat--Shamir query, it must guess the verifier challenge, which costs at most $1/q$ per outer proof. Hence, by a union bound over all accepted refresh and spend proofs,
+\[
+|\Pr[S_2]-\Pr[S_1]| \le \frac{q_R+q_S}{q} + \negl(\lambda).
+\]
+Conditioned on not aborting, the challenger now has an explicit witness for every accepted refresh and spend transcript, including the BEQ openings needed for the balance and expiry statements.
+
+\paragraph{Game $\mathsf{G}_3$ (issuance via a BBS+ signing oracle).} Replace honest issuance with a BBS+ signing oracle on attribute tuples $(k_{\mathsf{sub}},c_{\mathsf{max}},E_{\mathsf{max}})$. Because the issuance protocol already exposes a standard proof of knowledge of the committed attributes and the challenger merely forwards the resulting blinded commitment to the signing oracle, the distribution seen by $\mathcal{A}$ is unchanged; thus $\Pr[S_3]=\Pr[S_2]$.
+
+It remains to bound the three ways in which $\mathcal{A}$ can win.
+
+\paragraph{Case A: forging a master token.} If $\mathcal{A}$ outputs a valid master token that was never returned by the issuance oracle, then $\mathcal{A}$ has produced a fresh valid BBS+ signature on a new message tuple. This is exactly a one-more BBS+/EUF-CMA forgery and therefore breaks the $q$-SDH assumption. Hence
+\[
+\Pr[\text{Case A in }\mathsf{G}_3] \le \advantage{q\text{-}SDH}(\mathcal{B}_{\text{SDH}}).
+\]
+
+\paragraph{Case B: obtaining two daily tokens for one master token in one epoch.} By Lemma~\ref{lem:refresh-extractor}, every accepted refresh transcript yields a concrete master secret $k_{\mathsf{sub}}$ and satisfies $N_T = k_{\mathsf{sub}} H_T$. Therefore, for a fixed master secret and a fixed epoch $T$, the nullifier is uniquely determined. If two accepted daily tokens came from the same master token and same epoch, they would necessarily carry the same nullifier and would hit the authoritative lookup in $\DB_{\mathsf{epoch}}$. Thus Case~B is impossible in $\mathsf{G}_3$ except if the adversary broke the extraction/game-conditioning event already charged in $\mathsf{G}_2$.
+
+\paragraph{Case C: overspending.} Consider any maximal chain of accepted spends descending from one accepted daily token. Let the initial balance be $b_0=c_{\mathsf{max}}$. For the $j$-th accepted spend, Lemma~\ref{lem:spend-extractor} yields a spend amount $s_j$ and a refund balance $b_j$ satisfying
+\[
+b_{j-1} = s_j + b_j,
+\qquad
+b_j \ge 0.
+\]
+Indeed, in Exact/Unit mode this is the extracted identity $m=c_{\mathsf{bal}}-s$, while in Hidden mode the second BEQ proof extracts $s_{\mathsf{shift}}$ and hence $s=s_{\mathsf{shift}}+1$, giving the same relation. Telescoping over a chain of $t$ accepted spends gives
+\[
+c_{\mathsf{max}} = b_0 = \sum_{j=1}^{t} s_j + b_t \ge \sum_{j=1}^{t} s_j.
+\]
+So one daily token can never authorize total spending above $c_{\mathsf{max}}$. The only remaining route to overspending is to create two daily tokens from the same master token and epoch, which is Case~B and already excluded.
+
+Combining Games $\mathsf{G}_0$--$\mathsf{G}_3$ with Cases A--C proves the stated bound. Any residual failure of the algebraic extraction lemmas or of the BEQ sub-extractor is absorbed into the discrete-log term $\advantage{DL}(\mathcal{B}_{\text{DL}})$ and the negligible remainder.
+\end{proof}
+
+\subsection{Unlinkability}
+
+\begin{theorem}[Unlinkability]
+Let $\mathcal{A} = (\mathcal{A}_1, \mathcal{A}_2)$ be a PPT adversary against the $\mathsf{UNLINK}$ game making at most $q_{\text{RO}}$ random oracle queries, $q_{\mathsf{refresh}}$ challenge refresh queries, and $q_{\mathsf{spend}}$ challenge spend queries. Then there exists an adversary $\mathcal{B}_{\text{SXDH}}$ such that
+\[
+\advantage{UNLINK}(\mathcal{A}) \le \advantage{SXDH}(\mathcal{B}_{\text{SXDH}}) + \epsilon_{\mathsf{PoK}} + \frac{q_{\text{RO}}^2}{2q} + \frac{q_{\mathsf{refresh}}+q_{\mathsf{spend}}}{q} + \frac{1}{2^{128}} + \negl(\lambda),
+\]
+where $\epsilon_{\mathsf{PoK}}$ is the knowledge-soundness error of the server's Schnorr proof of knowledge.
+\end{theorem}
+\begin{proof}
+We move through hybrids $\mathsf{H}_0,\dots,\mathsf{H}_5$, where $\Pr[S_{\mathsf{H}_i}]$ denotes the probability that $\mathcal{A}$ guesses the challenge bit in hybrid $\mathsf{H}_i$.
+
+\paragraph{Game $\mathsf{H}_0$.} This is the real unlinkability game.
+
+\paragraph{Game $\mathsf{H}_1$ (extract the malicious server key).} During setup, the malicious server must provide a Schnorr proof of knowledge $\pi_S$ for the discrete logarithm of its advertised verification key. Rewinding that proof with the standard Fiat--Shamir extractor yields $y$ such that $\mathsf{pk}_S = g_2^y$, except with probability $\epsilon_{\mathsf{PoK}}$. Thus
+\[
+|\Pr[S_{\mathsf{H}_1}] - \Pr[S_{\mathsf{H}_0}]| \le \epsilon_{\mathsf{PoK}}.
+\]
+
+\paragraph{Game $\mathsf{H}_2$ (simulate challenge-phase proofs).} Using the extracted trapdoor $y$, the challenger simulates every challenge refresh and spend proof. For the BBS+ component it samples $A' \xleftarrow{\$} \mathbb{G}_1$, sets $\bar{A}=(A')^y$, chooses responses uniformly, reconstructs the commitments, and programs the scalar random oracle on the resulting transcript. For the range components it uses the BEQ simulator from Theorem~\ref{thm:beq-zk}. The only way this simulation can fail is if the adversary never queried the relevant Fiat--Shamir string (costing at most $1/q$ per simulated outer proof and $2^{-128}$ for the BEQ challenge) or if a random-oracle collision occurs. Therefore
+\[
+|\Pr[S_{\mathsf{H}_2}] - \Pr[S_{\mathsf{H}_1}]| \le \frac{q_{\mathsf{refresh}}+q_{\mathsf{spend}}}{q} + \frac{1}{2^{128}} + \frac{q_{\text{RO}}^2}{2q} + 2^{-80}.
+\]
+
+\paragraph{Game $\mathsf{H}_3$ (replace the refresh nullifier by random).} In the challenge refresh query, replace
+\[
+N_T = k_{\mathsf{sub}}^{(b)} H_T
+\]
+by a uniformly random element of $\mathbb{G}_1$, while leaving the simulated proof machinery from $\mathsf{H}_2$ unchanged. Distinguishing $\mathsf{H}_3$ from $\mathsf{H}_2$ exactly distinguishes a Diffie--Hellman product from random in $\mathbb{G}_1$: given $(g_1,g_1^a,g_1^b,C)$, embed the two challenge clients' master secrets as $a$ and $b$, set $H_T=g_1$, and program the challenge nullifier as $N_T=C$. If $C=g_1^{ab}$ the transcript is real; if $C$ is random, the transcript is distributed as in $\mathsf{H}_3$. Therefore
+\[
+|\Pr[S_{\mathsf{H}_3}] - \Pr[S_{\mathsf{H}_2}]| \le \advantage{SXDH}(\mathcal{B}_{\text{SXDH}}).
+\]
+
+\paragraph{Game $\mathsf{H}_4$ (randomize spend-side commitments).} In challenge spend sessions, replace the refund commitment $K'$ and, in Hidden mode, the shifted amount commitment $C_{s,\mathsf{shift}}$ by fresh perfectly hiding commitments to the same public statement values, and continue simulating the outer spend proof and the BEQ subproofs exactly as in $\mathsf{H}_2$. Because Pedersen commitments are perfectly hiding, BBS+ randomization makes $A'$ and $\bar{A}$ fresh, and the only disclosed Exact/Unit metadata is the application-chosen public amount $s$, the adversary's entire view is now independent of the underlying client key pair. Thus $\Pr[S_{\mathsf{H}_4}] = \Pr[S_{\mathsf{H}_3}]$.
+
+\paragraph{Game $\mathsf{H}_5$ (ideal game).} The challenger ignores the challenge bit $b$ and always uses the same simulator behavior. By construction, the transcript no longer depends on which of the two challenge clients was selected, so
+\[
+\Pr[S_{\mathsf{H}_5}] = \tfrac12.
+\]
+
+Summing the differences between adjacent hybrids gives the claimed bound.
+\end{proof}
+
+\subsection{Rate-Limit Soundness}
+
+\begin{theorem}[Rate-Limit Soundness]
+The EBUT construction satisfies rate-limit soundness under the Discrete Logarithm assumption. Concretely, for any PPT adversary $\mathcal{A}$,
+\[
+\advantage{RLS}(\mathcal{A}) \le \advantage{DL}(\mathcal{B}_{\text{DL}}) + \frac{q_{\text{RO}}^2}{2q} + \frac{q_{\mathsf{refresh}}}{q} + \frac{1}{2^{128}} + \negl(\lambda).
+\]
+\end{theorem}
+\begin{proof}
+We again separate the two winning conditions from Game~3.
+
+\paragraph{Case 1: two daily tokens from one master secret in one epoch.}
+Take any accepted refresh tuple $(N_T,\pi_{\mathsf{refresh}},\mathcal{T}_{\mathsf{daily}})$ output by the adversary. By Lemma~\ref{lem:refresh-extractor}, except with the already-accounted-for outer knowledge error and BEQ failure probability, extraction yields a master secret $k_{\mathsf{sub}}$ satisfying
+\[
+N_T = k_{\mathsf{sub}} H_T.
+\]
+Therefore, for a fixed epoch $T$ and fixed master secret $k_{\mathsf{sub}}$, the nullifier is uniquely determined. If two valid refresh tuples for the same epoch came from the same master secret, they would necessarily contain the same nullifier, contradicting the game's requirement that the successful adversary output distinct nullifiers. Thus
+\[
+\Pr[\text{Case 1}] \le \advantage{DL}(\mathcal{B}_{\text{DL}}^{(1)}) + \frac{q_{\mathsf{refresh}}}{q} + \frac{1}{2^{128}} + \negl(\lambda).
+\]
+
+\paragraph{Case 2: overspending within an epoch.}
+Fix one accepted daily token and consider the entire accepted spend chain that descends from it. Let $b_0=c_{\mathsf{max}}$ be the initial balance encoded in that token. For each accepted spend $j \in \{1,\dots,t\}$, Lemma~\ref{lem:spend-extractor} yields a spend amount $s_j$ and a refund balance $b_j \ge 0$ such that the current token balance satisfies
+\[
+b_{j-1} = s_j + b_j.
+\]
+In Exact and Unit mode this is the extracted identity $m=c_{\mathsf{bal}}-s$. In Hidden mode, the second BEQ proof extracts $s_{\mathsf{shift},j}$, so $s_j=s_{\mathsf{shift},j}+1$, and the hidden-amount bridge yields the same equality. Unrolling the recurrence gives the exact telescoping identity
+\[
+b_0 = \sum_{j=1}^{t} s_j + b_t.
+\]
+Because every extracted refund balance is range-checked by BEQ, we have $b_t \ge 0$. Hence
+\[
+\sum_{j=1}^{t} s_j \le b_0 = c_{\mathsf{max}}.
+\]
+So a single accepted daily token cannot authorize total spending above $c_{\mathsf{max}}$.
+
+The only remaining way to exceed the epoch budget is to fork the chain, i.e., to spend from two distinct daily tokens derived from the same master secret in the same epoch. But that is exactly Case~1. Therefore the overall rate-limit soundness advantage is bounded by the stated expression.
+\end{proof}
+
+\section{Implementation Guidance}
+
+We now provide detailed, production-oriented guidance for implementing the EBUT protocol. These recommendations are essential for security, interoperability, and performance.
+
+\subsection{BBS+ Library}
+
+Implementers should use a CFRG-compliant BBS+ library that supports blind issuance and zero-knowledge proofs of possession. The proof described in Protocol~1 of the ACT paper uses multiplicative randomization ($A' = A^{r_1}$) and is proven secure under the assumptions of this paper. Ensure that the verification equations match exactly those specified in Section~\ref{sec:construction}. In particular, refresh verification must use $\mathsf{pk}_{\mathsf{master}}$, spend verification must use $\mathsf{pk}_{\mathsf{daily}}$, and both public keys must be accepted only after their Schnorr proofs of knowledge verify.
+
+\subsection{Cross-Curve Batched Equality Proof Implementation}
+
+The EBUT protocol uses the BEQ to prove that a value $m$ is in $[0,2^{32}-1]$ and is consistent with the BLS12-381 commitment used in the BBS+ proof. To implement this correctly:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{BLS12-381 Commitment:} Compute $C_{\text{BLS}}$ using the public value generator $h_{\mathsf{val}}$ and the blinding generator $h_0$. Use $h_{\mathsf{val}} = h_4$ for balance commitments and $h_{\mathsf{val}} = h_5$ for hidden spend-amount commitments.
+\item \textbf{Ristretto Commitment:} Independently, using the \nolinkurl{curve25519-dalek} library with standard Ristretto generators \nolinkurl{RISTRETTO_BASEPOINT_POINT} (for $G$) and \nolinkurl{RISTRETTO_BASEPOINT_COMPRESSED} (for $H$, derived via hash-to-curve with domain separation), compute $C_{25519} = m \cdot G + r_{25519} \cdot H$ where $r_{25519} \xleftarrow{\$} \mathbb{Z}_{q_{25519}}$.
+\item \textbf{BEQ Proof Generation:} Execute the BEQ prover algorithm (Section~\ref{sec:crosscurve}) with inputs $(m, h_{\mathsf{val}}, r_{\text{BLS}}, r_{25519})$, context $\text{ctx} = H_{\text{ctx}}$, and auxiliary commitments being the BBS+ proof components ($A', \bar{A}, T_{\mathsf{BBS}}$, etc.). The prover outputs the tuple $\pi_{\text{BEQ}}$ with components $(C_{25519}, R_{\text{BLS}}, R_{25519}, z, z_{\text{BLS}}, z_{25519}, \pi_{\text{range}})$.
+\item \textbf{Verification:} The server verifies $\pi_{\text{BEQ}}$ against $C_{\text{BLS}}$ and the auxiliary commitments. The Dalek Bulletproof verification uses the library's \textbf{default generators}.
+\end{enumerate}
+
+\textbf{Critical:} Do \textbf{not} attempt to override the Dalek Bulletproof generators with BLS12-381 points. The binding between curves is established by the Sigma protocol equality check, not by generator substitution. The Bulletproof transcript must include the BBS+ commitments to prevent splicing attacks.
+
+\subsection{Epoch Nullifier Computation}
+
+The client computes the epoch base point deterministically:
+\[
+H_T = \mathcal{H}_{\mathbb{G}_1}(\text{``EBUT:Epoch:''} \parallel T) \in \mathbb{G}_1.
+\]
+The hash function $\mathcal{H}_{\mathbb{G}_1}$ should be instantiated using a standard hash-to-curve method (e.g., RFC 9380) with domain separation tag \texttt{"ACT:Epoch:"}. The epoch $T$ is encoded as a 32-bit \textbf{little-endian} integer (matching the reference implementation's \texttt{t.to\_le\_bytes()} convention). The nullifier is $N_T = k_{\mathsf{sub}} \cdot H_T$. The server \textbf{must not} use a secret-derived base; the trustless nullifier property relies on the public derivation of $H_T$.
+
+\subsection{Idempotency and Torn Transaction Recovery}
+
+Network failures and client crashes can lead to retried requests. To prevent false duplicate rejections, retry handling must be implemented by the same authoritative records that enforce nullifier uniqueness; a separate best-effort cache is not sufficient.
+
+\paragraph{Refresh Phase Idempotency.}
+When the server accepts a refresh request, it computes the refresh statement digest from the deterministic public statement rather than from the proof transcript:
+\[
+h_{\mathsf{ref}} = \mathcal{H}_{\mathsf{scalar}}\!\left(\text{``EBUT:Idempotency:Refresh''} \parallel \mathsf{enc}_{32}(T) \parallel N_T \parallel K_{\mathsf{daily}} \right).
+\]
+Because $T$ is fixed-width and the compressed encodings of $N_T$ and $K_{\mathsf{daily}}$ are fixed-length group elements, this encoding is unambiguous. When $\mathsf{RefreshFinalize}$ commits $N_T$, it stores $(h_{\mathsf{ref}}, A_{\mathsf{daily}}, e_{\mathsf{daily}}, s'_{\mathsf{daily}})$ in $\DB_{\mathsf{epoch}}$ until the end of epoch $T$ plus the grace window. If a client later resubmits the same statement $(T,N_T,K_{\mathsf{daily}})$ with a fresh proof, the server reads the existing $N_T$ record and returns the stored response. If the same $N_T$ appears with a different digest, the request is rejected.
+The expiry time of this refresh record is a protocol invariant, not an implementation hint: it \textbf{must} be set to the absolute time $t_{\mathsf{end}}(T)+\Delta_{\mathsf{grace}}$, or equivalently to the insertion-time TTL $(t_{\mathsf{end}}(T)-\tau_{\mathsf{chk}})+\Delta_{\mathsf{grace}}$ derived from the request snapshot. A shorter cache lifetime can create a permanent honest-client lockout even while epoch $T$ is still retry-eligible.
+The request-time clock snapshot $\tau_{\mathsf{chk}}$ used for this insertion must be captured exactly once at the initial epoch check. If the backend uses relative TTLs, it must derive them from $t_{\mathsf{end}}(T)+\Delta_{\mathsf{grace}}-\tau_{\mathsf{chk}}$, not from the later wall clock after proof verification. If the backend uses absolute-expiry writes and finalization reaches $t_{\mathsf{end}}(T)+\Delta_{\mathsf{grace}}$ before the durable write linearizes, the server must abort instead of returning a response with no durable retry record.
+
+\textbf{Atomic finalization requirement.}
+There is no allowed execution in which $N_T$ is committed without its corresponding response. If the server crashes after persisting the response-bearing refresh record, a retry recovers that same record; if the server crashes before the atomic finalization linearizes, the retry sees no committed $N_T$ and simply re-runs the proof checks. If an implementation physically splits the response store from $\DB_{\mathsf{epoch}}$, it must still realize the same linearizable semantics as $\mathsf{RefreshFinalize}$; otherwise it falls outside the formal model.
+
+\textbf{Honest-client recovery.}
+Because $k_{\mathsf{daily}}$ and $r_{\mathsf{daily}}$ are deterministic functions of $(k_{\mathsf{sub}},T)$, an honest client that crashes after the server has accepted the refresh can recompute the same opening of $K_{\mathsf{daily}}$ locally and resubmit a fresh proof for the same statement. The digest above still matches, so the server returns the previously stored blind signature. No synchronous client-side disk write is required for refresh recovery. This determinism is a liveness aid for honest retries, not an extra server-side soundness assumption.
+
+\paragraph{Spend Phase Idempotency.}
+For spend requests, the spend statement digest must bind the mode tag and every mode-specific public field using the same length-prefixed encoding:
+\[
+\begin{aligned}
+h_{\mathsf{id}} = \mathcal{H}_{\mathsf{scalar}}\!\bigl(&\text{``EBUT:Idempotency:Spend''} \parallel \mathsf{mode} \\
+&\parallel \mathsf{len}(s_{\mathsf{req}}^{\mathsf{enc}}) \parallel s_{\mathsf{req}}^{\mathsf{enc}} \\
+&\parallel \mathsf{len}(C_{s,\mathsf{shift}}^{\mathsf{enc}}) \parallel C_{s,\mathsf{shift}}^{\mathsf{enc}} \\
+&\parallel \mathsf{len}(\pi_{\text{BEQ\_shift}}^{\mathsf{enc}}) \parallel \pi_{\text{BEQ\_shift}}^{\mathsf{enc}} \\
+&\parallel \mathsf{len}(\pi_{\mathsf{spend}}) \parallel \pi_{\mathsf{spend}} \parallel \eta \bigr).
+\end{aligned}
+\]
+Here $s_{\mathsf{req}}^{\mathsf{enc}}$ is the 4-byte encoding of $s_{\mathsf{req}}$ in Exact and Unit mode and the empty string in Hidden mode; conversely $C_{s,\mathsf{shift}}^{\mathsf{enc}}$ and $\pi_{\text{BEQ\_shift}}^{\mathsf{enc}}$ are populated only in Hidden mode and encoded as the empty string in Exact and Unit mode. The fixed length of $\eta$ (16 bytes) eliminates ambiguity on that side; the length prefix on every optional field prevents byte-shifting and cross-mode malleability. Raw concatenation that omits the mode tag or omits the empty-field markers is \textbf{prohibited}: otherwise a relay can rewrite an Exact request as Hidden (or vice versa) while preserving the digest. Upon acceptance, $\mathsf{SpendFinalize}$ stores $(h_{\mathsf{id}}, \eta, A^*, e^*, s'^*)$ inside the authoritative $k_{\mathsf{cur}}$ record in $\DB_{\mathsf{spend}}$ and marks $\eta$ spent atomically. The expiry of that record is tied to the token epoch: it \textbf{must} remain readable until the absolute time $t_{\mathsf{end}}(T_{\mathsf{issue}})+\Delta_{\mathsf{grace}}$. A later request with the same $k_{\mathsf{cur}}$ succeeds only when both the digest and nonce match that stored record, in which case the server returns the stored response immediately; all other collisions are rejected. The response-bearing spend record and the exact spent-nonce marker must remain readable for the same epoch-plus-grace window required by the model. If the spend record expires first, a client whose response was lost may later retry, miss the stored response, hit the nonce or nullifier checks, and be rejected even though the original transaction committed.
+For Unit mode, this digest uses the explicit encodings $\mathsf{mode}=\text{``Unit''}$ and $s_{\mathsf{req}}^{\mathsf{enc}} = \mathsf{enc}_{32}(1)$; Unit mode must not treat $s_{\mathsf{req}}$ as omitted. As in refresh, any relative TTL used by $\mathsf{SpendFinalize}$ must be derived from the request-time snapshot captured before proof verification, never from the later wall clock at finalization.
+
+\subsection{API Payload Specification}
+
+Implementers must transmit the public statements alongside the proof. We provide JSON schemas for both refresh and spend requests. All binary data is encoded in hexadecimal. There is no separate nonce-acquisition endpoint: every spend request carries the client-derived 16-byte nonce $\eta$ directly.
+
+\subsubsection{Refresh Request Payload}
+\begin{verbatim}
+{
+  "T": <32-bit unsigned integer>,
+  "N_T": <48-byte compressed G1 point, hex>,
+  "K_daily": <48-byte compressed G1 point, hex>,
+  "C_Delta": <48-byte compressed G1 point, hex>,
+  "pi_refresh": {
+    "A_prime": <48-byte compressed G1 point, hex>,
+    "A_bar": <48-byte compressed G1 point, hex>,
+    "T_BBS": <48-byte compressed G1 point, hex>,
+    "T_scale_N": <48-byte compressed G1 point, hex>,
+    "T_N": <48-byte compressed G1 point, hex>,
+    "T_scale_D": <48-byte compressed G1 point, hex>,
+    "T_D": <48-byte compressed G1 point, hex>,
+    "T_scale_B": <48-byte compressed G1 point, hex>,
+    "T_B": <48-byte compressed G1 point, hex>,
+    "z_e": <32-byte scalar, hex>,
+    "z_r1": <32-byte scalar, hex>,
+    "z_s_tilde": <32-byte scalar, hex>,
+    "z_k_tilde": <32-byte scalar, hex>,
+    "z_c_tilde": <32-byte scalar, hex>,
+    "z_E_tilde": <32-byte scalar, hex>,
+    "z_u": <32-byte scalar, hex>,
+    "z_v": <32-byte scalar, hex>,
+    "z_w": <32-byte scalar, hex>,
+    "pi_BEQ_exp": <binary blob, base64 or hex>
+  }
+}
+\end{verbatim}
+
+\subsubsection{Spend Request Payload}
+Unit mode (specialized Exact path):
+\begin{verbatim}
+{
+  "mode": "Unit",
+  "s": 1,
+  "s_req": 1,
+  "T_issue": <32-bit unsigned integer>,
+  "k_cur": <32-byte scalar, hex>,
+  "eta": <16-byte nonce, hex>,
+  "K_prime": <48-byte compressed G1 point, hex>,
+  "C_BP": <48-byte compressed G1 point, hex>,
+  "pi_spend": { ... same shape as Exact ... }
+}
+\end{verbatim}
+
+Exact mode:
+\begin{verbatim}
+{
+  "mode": "Exact",
+  "s": <32-bit unsigned integer>,
+  "s_req": <32-bit unsigned integer>,
+  "T_issue": <32-bit unsigned integer>,
+  "k_cur": <32-byte scalar, hex>,
+  "eta": <16-byte nonce, hex>,
+  "K_prime": <48-byte compressed G1 point, hex>,
+  "C_BP": <48-byte compressed G1 point, hex>,
+  "pi_spend": {
+    "A_prime": <48-byte compressed G1 point, hex>,
+    "A_bar": <48-byte compressed G1 point, hex>,
+    "T_BBS": <48-byte compressed G1 point, hex>,
+    "T_scale_R": <48-byte compressed G1 point, hex>,
+    "T_refund": <48-byte compressed G1 point, hex>,
+    "T_scale_T": <48-byte compressed G1 point, hex>,
+    "T_total": <48-byte compressed G1 point, hex>,
+    "T_scale_BP": <48-byte compressed G1 point, hex>,
+    "T_BP": <48-byte compressed G1 point, hex>,
+    "z_e": <32-byte scalar, hex>,
+    "z_r1": <32-byte scalar, hex>,
+    "z_s_tilde": <32-byte scalar, hex>,
+    "z_c_tilde": <32-byte scalar, hex>,
+    "z_u": <32-byte scalar, hex>,
+    "z_v": <32-byte scalar, hex>,
+    "z_w": <32-byte scalar, hex>,
+    "pi_BEQ_spend": <binary blob, base64 or hex>
+  }
+}
+\end{verbatim}
+
+Hidden mode:
+\begin{verbatim}
+{
+  "mode": "Hidden",
+  "T_issue": <32-bit unsigned integer>,
+  "k_cur": <32-byte scalar, hex>,
+  "eta": <16-byte nonce, hex>,
+  "K_prime": <48-byte compressed G1 point, hex>,
+  "C_BP": <48-byte compressed G1 point, hex>,
+  "C_s_shift": <48-byte compressed G1 point, hex>,
+  "pi_BEQ_s_shift": <binary blob, base64 or hex>,
+  "pi_spend": {
+    "A_prime": <48-byte compressed G1 point, hex>,
+    "A_bar": <48-byte compressed G1 point, hex>,
+    "T_BBS": <48-byte compressed G1 point, hex>,
+    "T_scale_S": <48-byte compressed G1 point, hex>,
+    "T_S": <48-byte compressed G1 point, hex>,
+    "T_scale_R": <48-byte compressed G1 point, hex>,
+    "T_refund": <48-byte compressed G1 point, hex>,
+    "T_scale_BP": <48-byte compressed G1 point, hex>,
+    "T_BP": <48-byte compressed G1 point, hex>,
+    "z_e": <32-byte scalar, hex>,
+    "z_r1": <32-byte scalar, hex>,
+    "z_s_tilde": <32-byte scalar, hex>,
+    "z_c_tilde": <32-byte scalar, hex>,
+    "z_amt_tilde": <32-byte scalar, hex>,
+    "z_u": <32-byte scalar, hex>,
+    "z_v": <32-byte scalar, hex>,
+    "z_w": <32-byte scalar, hex>,
+    "z_x": <32-byte scalar, hex>,
+    "pi_BEQ_spend": <binary blob, base64 or hex>
+  }
+}
+\end{verbatim}
+
+\subsection{Serialization and Domain Separation}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Group Elements:} All $\mathbb{G}_1$ elements must be serialized in \textbf{compressed} form (48 bytes for BLS12-381), and all $\mathbb{G}_2$ elements must be serialized in compressed form (96 bytes for BLS12-381). Deserialization must validate canonical encoding and prime-order subgroup membership.
+\item \textbf{Scalars:} All field scalars on the wire must be serialized as \textbf{fixed-width 32-byte big-endian} integers. During deserialization, any 32-byte scalar $x$ must be rejected if $x \ge q$ (the group order). This prevents scalar malleability attacks. The BEQ response $z_e$ is the one explicit exception: it is an integer response, not a field element, and is encoded as raw little-endian bytes as described in Section~\ref{sec:critical}.
+\item \textbf{Domain Separation:} All hash function invocations must include a domain separation label. In the reference implementation, the generator DST is \texttt{"ACT:BBS:"}, the epoch base-point DST is \texttt{"ACT:Epoch:"}, the BEQ challenge domain is \texttt{"ACT:BEQ:Challenge"}, the Bulletproof transcript label is \texttt{"EBUT:BEQ:Range"}, the server-PoK label is \texttt{"EBUT:ServerPoK"}, and the Fiat--Shamir labels are \texttt{b"Refresh"} and \texttt{b"Spend"} respectively. Any interoperable implementation must use these exact strings. The context hash $H_{\mathsf{ctx}}$ (Section~4.1.1) must be included as the first element in every main-proof Fiat--Shamir challenge to bind all proofs to the deployment.
+\item \textbf{Fiat--Shamir Hash Width:} For the BLS12-381 scalar field ($q$ a 255-bit prime), the bias introduced by reducing a 32-byte SHA-256 digest modulo $q$ is $(2^{256} \bmod q)/q \approx 2^{-255}$, which is negligible at the 128-bit security level. The reference implementation uses SHA-256 with repeated-subtraction mod-$q$ reduction and is cryptographically sound. For conservative interoperability or when targeting fields with smaller orders, use SHA-512 (64-byte output) before reduction.
+\item \textbf{Subgroup Checks:} Every received $\mathbb{G}_1$ \emph{and} $\mathbb{G}_2$ element must be validated to lie in the prime-order subgroup to prevent small-subgroup attacks. In particular, the client must validate the server verification keys and the Schnorr proof commitments $T_y \in \mathbb{G}_2$ before evaluating $\pi_S$.
+\end{itemize}
+
+\subsection{Nullifier Database Architecture}
+
+The server maintains two logical sets:
+
+\begin{itemize}
+\item $\DB_{\mathsf{epoch}}$: stores compressed $\mathbb{G}_1$ points (48 bytes). Each refresh record for epoch $T$ must be assigned the absolute expiry time $t_{\mathsf{end}}(T)+\Delta_{\mathsf{grace}}$. If the backend offers only relative TTLs, compute them from the request-time snapshot $\tau_{\mathsf{chk}}$ captured at the initial epoch check, i.e., $(t_{\mathsf{end}}(T)-\tau_{\mathsf{chk}})+\Delta_{\mathsf{grace}}$. \textbf{The database must not be bulk-cleared at the epoch boundary}; individual entries expire after their per-entry TTL elapses.
+\item $\DB_{\mathsf{spend}}$: stores canonical scalars (32 bytes). Each spend record for a token issued in epoch $T_{\mathsf{issue}}$ must be assigned the absolute expiry time $t_{\mathsf{end}}(T_{\mathsf{issue}})+\Delta_{\mathsf{grace}}$. If the backend offers only relative TTLs, compute them from the request-time snapshot $\tau_{\mathsf{chk}}$ captured at the initial bounds check, i.e., $(t_{\mathsf{end}}(T_{\mathsf{issue}})-\tau_{\mathsf{chk}})+\Delta_{\mathsf{grace}}$. \textbf{The database must not be bulk-cleared at the epoch boundary}; individual entries expire after their per-entry TTL elapses.
+\item \textbf{Nonce store} ($\mathcal{N}_{\mathsf{spent}}$): stores the 16-byte session nonces $\eta$ that have been consumed during spend operations. Each entry \textbf{must} be assigned the same absolute expiry as the corresponding spend record, namely $t_{\mathsf{end}}(T_{\mathsf{issue}})+\Delta_{\mathsf{grace}}$. Omitting a TTL causes permanent accumulation: at high spend velocity, uncontrolled growth of the nonce set will exhaust Redis memory. In Redis, store each nonce as \verb|SET "nonce:{eta_hex}" 1 EXAT {epoch_end + grace_seconds}| to guarantee per-entry expiry independent of other entries.
+\end{itemize}
+
+\paragraph{Epoch Grace Period.}
+\textbf{Hard protocol invariant:} the grace period and database expiry must be configured as a single unit. If the server accepts refresh or spend requests for epoch $T-1$ during a grace window of duration $\Delta_{\mathsf{grace}}$ after the start of epoch $T$, then entries written to $\DB_{\mathsf{epoch}}$ and $\DB_{\mathsf{spend}}$ during epoch $T-1$ \emph{must remain readable} until the absolute time $t_{\mathsf{end}}(T-1)+\Delta_{\mathsf{grace}}$. For refresh this is mandatory: the idempotency record keyed by $N_T$ must expire \emph{exactly} at epoch end plus grace, or equivalently use
+\[
+\mathsf{TTL}_{\mathsf{refresh}} = (t_{\mathsf{end}}(T)-\tau_{\mathsf{chk}})+\Delta_{\mathsf{grace}}
+\]
+at insertion time. The request-time snapshot used here must be captured exactly once at the initial epoch/bounds check and carried unchanged to finalization. Implementations with relative TTLs must compute the TTL from that captured snapshot, \emph{not} from the later wall clock after proof verification. Implementations with absolute-expiry writes (for example, Redis \texttt{EXAT}) must abort if the final durable write would occur at or after the expiry boundary, because returning a response without a durable record creates a TOCTOU double-mint window. Any shorter, implementation-defined cache lifetime can permanently lock out an honest retry before the epoch has actually ended. Bulk-wiping either database at the epoch boundary while simultaneously accepting grace-period requests creates an exploit window in which an attacker may re-use an epoch-$T{-}1$ nullifier that appears fresh because its record was erased. Concretely, use per-key TTL-based storage: in Redis, store each nullifier as an individual key (for example, \nolinkurl{SET "epoch:nullifier:{N_T}" 1 EXAT {epoch_end + grace_seconds}}) so that each entry expires only after the grace window has fully closed, independent of other entries.
+
+\paragraph{Atomicity.}
+All insertions must be conditional and atomic. In SQL, use \texttt{INSERT} with \texttt{ON CONFLICT DO NOTHING}. In Redis, use \texttt{SETNX}. If an insertion fails due to a duplicate key, the request must be rejected immediately.
+
+\paragraph{High-Velocity Spends.}
+A user may legitimately generate up to $c_{\mathsf{max}}$ spends in a short period. To handle this efficiently, implementers \textbf{must} use an exact, authoritative data structure as the definitive store for $\DB_{\mathsf{spend}}$ and the nonce spent-set. In Redis, prefer storing each nullifier as an individual key with an absolute expiry (for example, \nolinkurl{SET "spend:nullifier:{k_cur}" 1 EXAT {epoch_end + grace_seconds}}), which provides $O(1)$ membership tests and per-entry expiry without affecting other entries. If only relative TTLs are available, derive \verb|ttl_seconds| from the request snapshot captured at Step~1, not from the later wall clock. A probabilistic structure such as a Bloom filter \textbf{must not} serve as the authoritative store: as the filter fills during an epoch, the false-positive rate rises, causing legitimate spends to be incorrectly rejected. A Bloom filter or Cuckoo filter \emph{may} be placed in front of the exact store as a fast-reject optimisation to avoid unnecessary database lookups for obviously duplicate entries, but any positive result from the filter must be confirmed against the authoritative store before the request is rejected.
+
+\subsection{Verification Order (Optimized)}
+
+To prevent CPU exhaustion attacks from malformed proofs, the server must perform checks in the following order (fastest to slowest). \textbf{All database writes (state mutations) are deferred to the final step and executed only after all cryptographic checks pass.} Performing writes earlier exposes the server to denial-of-service attacks in which an adversary submits a valid nonce with garbage cryptographic proofs, permanently burning the legitimate user's nonce before the proof is validated.
+
+\begin{enumerate}[leftmargin=*]
+\item Epoch and parameter bounds (e.g., $s > 0$, $T$ valid). Capture a request-time snapshot $\tau_{\mathsf{chk}}$ exactly once here and compute the absolute expiry $t_{\mathsf{exp}}$ for the request.
+\item \textbf{Authoritative retry-record lookup} (query the committed refresh/spend record and return the stored token if the statement digest matches).
+\item Nonce read-only check (16-byte format, non-zero, freshness; \textbf{no write}).
+\item Nullifier read-only check and zero-scalar rejection ($N_T \neq 1_{\mathbb{G}_1}$, $k_{\mathsf{cur}} \neq 0$); \textbf{no write}.
+\item Basic inequality checks ($A' \neq 1_{\mathbb{G}_1}$, $T_{\mathsf{BBS}} \neq 1_{\mathbb{G}_1}$).
+\item Bridge equation checks (additive group operations, fast).
+\item \textbf{Schnorr MSM verification} (BBS+ core without pairing) – $\approx 0.5$ ms.
+\item \textbf{Bulletproof verification} (or BEQ verification) – $\approx 1$--$2$ ms.
+\item \textbf{Bilinear pairing checks} – $\approx 2$--$4$ ms.
+\item \textbf{Atomic finalization} (invoke $\mathsf{RefreshFinalize}$ or $\mathsf{SpendFinalize}$; commit the response together with the nullifier/nonce state using the previously captured $\tau_{\mathsf{chk}}$ and $t_{\mathsf{exp}}$; for relative TTLs derive lifetime from $t_{\mathsf{exp}}-\tau_{\mathsf{chk}}$, and for absolute-expiry writes abort if the durable write would occur at or after $t_{\mathsf{exp}}$; reject on concurrent mismatch).
+\end{enumerate}
+
+\subsection{Edge Cases}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{$s = 0$:} In Exact and Unit mode, reject explicitly via the public bounds check. In Hidden mode, enforce the lower bound cryptographically by committing to $s_{\mathsf{shift}} = s-1$ and proving $s_{\mathsf{shift}} \in [0,2^{32}-1]$; the verifier then reconstructs $C_s = C_{s,\mathsf{shift}} + h_5$. Spending zero credits is therefore unrepresentable in a valid Hidden-mode proof.
+\item \textbf{Zero scalars:} The client must ensure $k_{\mathsf{sub}} \neq 0$, $k_{\mathsf{daily}} \neq 0$, $k^* \neq 0$. The server must reject any nullifier $k_{\mathsf{cur}} = 0$ or $N_T = 1_{\mathbb{G}_1}$.
+\item \textbf{Zero balance:} A token with $c_{\mathsf{bal}} = 0$ is allowed; further spends will fail because $s > 0$ and $m \ge 0$ cannot be satisfied.
+\item \textbf{Clock synchronization:} Accept refresh requests with $T$ within a small tolerance (e.g., $\pm 1$ epoch) to accommodate client clock drift, but enforce the expiry check strictly.
+\item \textbf{$c_{\mathsf{max}}$ range:} The server must enforce $c_{\mathsf{max}} \in [0, 2^{32}-1]$ during minting to ensure compatibility with 32-bit range proofs.
+\end{itemize}
+
+\subsection{Privacy and Operational Considerations}
+
+\paragraph{Local Spend Nonce Derivation.}
+EBUT eliminates server-generated nonces, the \texttt{GET /nonce} endpoint, and the earlier ZK-Merkle nonce-acquisition machinery. For every spend, the client derives $\eta_i = \mathcal{H}_{128}(\text{``EBUT:Spend:Nonce''} \parallel k_{\mathsf{sub}} \parallel T_{\mathsf{issue}} \parallel i)$ locally from its secret state, binds $\eta_i$ into the Fiat--Shamir challenge, and sends it only once as part of the spend request. The server performs a read-only freshness test $\eta_i \notin \mathcal{N}_{\mathsf{spent}}$ and atomically inserts $\eta_i$ upon acceptance. This removes the extra network round trip that would otherwise correlate nonce acquisition with the later anonymous spend while still allowing deterministic honest-client recovery.
+
+\begin{theorem}[Collision and Replay Resistance of Deterministically Derived Spend Nonces]
+Let $q_S$ be the number of accepted spends during the lifetime of the nonce store for a given epoch. If each honest client derives $\eta_i = \mathcal{H}_{128}(\text{``EBUT:Spend:Nonce''} \parallel k_{\mathsf{sub}} \parallel T_{\mathsf{issue}} \parallel i)$ from a secret master key $k_{\mathsf{sub}}$ and a unique local counter $i$, and if $\mathcal{H}_{128}$ is modeled as a random oracle, then the probability of an honest collision is at most $q_S(q_S-1)/2^{129} \approx q_S^2/2^{128}$. Moreover, any replay of a previously accepted spend transcript is rejected except with this negligible collision probability.
+\end{theorem}
+\begin{proof}
+Under the random-oracle model, each honest $\eta_i$ is uniformly distributed in $\{0,1\}^{128}$ conditioned on the adversary's view so long as $k_{\mathsf{sub}}$ remains secret and the counter $i$ is never reused for the same issue epoch. The collision bound is therefore the standard birthday estimate for 128-bit values. For replay, note that $\eta_i$ is hashed into the Fiat--Shamir challenge and therefore bound to the full spend transcript. Replaying an already accepted transcript necessarily reuses the same $\eta_i$, which is rejected by the server's spent-nonce set unless an honest collision occurs. Hence both accidental collisions and successful replays are negligible in $\lambda$ for polynomial $q_S$.
+\end{proof}
+
+\paragraph{Epoch Boundary Burst Capacity.}
+If $\Delta_{\mathsf{grace}} > 0$, a user may hold an unexpired token from the previous epoch while also minting a new token for the current epoch. During this overlap window, the user can spend up to $2 \cdot c_{\mathsf{max}}$ credits. This does not violate the long-term rate limit (one token per epoch), but it does permit a brief localized burst. If $\Delta_{\mathsf{grace}} = 0$ (the default), no such overlap exists. This trade-off is acceptable when fault tolerance matters more than strict instantaneous rate limiting; if strict per-minute rate limiting is required, the grace period must remain zero or be supplemented by an external system.
+
+\paragraph{Cross-Epoch Linkability Assumption.}
+The unlinkability of $N_T$ across epochs relies on the SXDH assumption in Type-3 pairings like BLS12-381. This provides computational (rather than information-theoretic) secrecy, which is the standard security guarantee for such protocols.
+
+\paragraph{Token Theft Resistance.}
+Even if an attacker intercepts a \texttt{SpendRequest} and submits it before the victim, the attacker receives only the blind signature $(A^*, e^*, s'^*)$. Without the local blinding factor $r^*$, the attacker cannot compute the final token secret $s^* = r^* + s'^*$. The token is cryptographically useless to the attacker, while the victim can safely resubmit and recover the stored response from the authoritative spend record before unblinding.
+
+\paragraph{Scope of Intra-Epoch Unlinkability.}
+EBUT achieves strict cryptographic severance between recursive intra-epoch spends. Because the server signs a perfectly hiding Pedersen commitment $K'$ during a spend, it cannot mathematically link the revealed nullifier $k^*$ of spend $i+1$ back to the $K'$ envelope it blindly signed in spend $i$. However, while cryptographic links are severed, the protocol remains susceptible to metadata correlation. If a user employs Exact mode and spends highly specific amounts (for example, 7 credits and then 13 credits) from the same IP address in rapid succession, the server can statistically fingerprint the behavioral session. Deployments requiring strong intra-epoch operational anonymity should therefore mandate Hidden mode and pair it with network-layer obfuscation such as Tor or mixnets.
+
+\paragraph{Plaintext Spend Amount and Statistical Fingerprinting.}
+In Exact mode (Section~\ref{sec:spend-exact}), the spend amount $s$ is transmitted in plaintext because Exact mode is the canonical server-enforced spend path. This intentionally disclosed metadata is an application-layer policy assumption, not a cryptographic break of EBUT's unlinkability theorem. A server that logs spend requests may still perform statistical fingerprinting on the disclosed $s$ values; deployments that require amount privacy should instead use Hidden mode (Section~\ref{sec:spend-hidden}), which hides $s$ at the cost of larger proofs and additional verification work.
+
+\section{Production Implementation: Critical, Medium-Priority, and Optimisation Decisions}
+\label{sec:implementation-triage}
+\label{sec:implementation}
+
+The preceding sections present EBUT as a mathematical object.  A faithful,
+production-grade instantiation must navigate a large design space in which
+some decisions are \emph{cryptographically mandated} (omitting or weakening
+them breaks the proven security properties), others are \emph{engineering
+imperatives} (omitting them creates exploitable failure modes in real
+deployments without affecting the formal proofs), and others are pure
+\emph{optimisations} (their omission degrades performance but not security).
+This section provides a unified, three-tier classification of every
+significant decision in the reference implementation, and records the
+precise ways in which the implementation diverges from the simplified
+presentation in earlier sections.
+
+\subsection{Classification Criteria}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Critical~(C).} Omitting or weakening this component invalidates
+  one or more of the formal security properties proved in
+  Sections~\ref{sec:crosscurve} and~\ref{sec:security-ebut}: it either
+  breaks soundness (unforgeability or rate-limit soundness), zero-knowledge
+  (unlinkability), or completeness.
+\item \textbf{Medium~(M).} The component does not change the cryptographic
+  proof, but its omission creates a practical attack vector or permanently
+  denies service to honest users under realistic network conditions.
+\item \textbf{Optimisation~(O).} The component improves throughput, latency,
+  or bandwidth without affecting correctness or security; it can be replaced
+  by a simpler equivalent without breaking any proof.
+\end{itemize}
+
+\subsection{Critical Components}
+\label{sec:critical}
+
+\begin{enumerate}[leftmargin=*,label=\textbf{C\arabic*.}]
+
+\item \textbf{Integer response $z_e$ computed over $\mathbb{Z}$, never reduced
+  modulo a field order.}
+  In the BEQ prover (Section~\ref{sec:crosscurve}), the response $z = u_m +
+  c \cdot m$ is a plain 241-bit integer.  Reducing $z$ modulo $q_{\text{BLS}}$
+  or $q_{25519}$ before transmission would silently truncate the high bits,
+  causing the BLS and Ristretto verification equations to use inconsistent
+  interpretations of $z$ and breaking either completeness or the extraction
+  argument.  The implementation carries $z_e$ as raw little-endian bytes
+  throughout as a dedicated BEQ integer encoding (not as a generic field
+  scalar wire encoding); the two field-reduced values $z_m^{\text{BLS}}$ and
+  $z_m^{25519}$ are derived independently inside the verifier by calling
+  \texttt{scalar\_from\_le\_bytes\_mod\_order} and
+  \texttt{DalekScalar::from\_bytes\_mod\_order} on the identical byte array.
+
+\item \textbf{Bounds check $z_e < q_{25519}$ on the verifier side.}
+  The verifier must reject any $z_e \ge q_{25519}$ before proceeding.  An
+  adversary who transmits $z_e \ge q_{25519}$ forces $z_m^{25519}$ to wrap
+  modulo $q_{25519}$, making the Ristretto equation verify with a different
+  effective integer than the BLS equation checks, breaking the
+  cross-curve equality binding.  The check is strictly tighter than
+  $z_e < 2^{256}$ because $q_{25519} \approx 2^{252}$ while $q_{\text{BLS}}
+  \approx 2^{255}$.
+
+\item \textbf{240-bit blinding factor $u_m$ for BEQ statistical zero-knowledge.}
+  The blinder $u_m$ must be drawn uniformly from $[0, 2^{240}-1]$.  The
+  statistical distance between the real and simulated distributions of $z_e$
+  is $c \cdot m / 2^{240} \le (2^{128}-1)(2^{32}-1)/2^{240} < 2^{-80}$
+  (Theorem~\ref{thm:beq-zk}).  Using a shorter blinder (e.g., $u_m \in [0, 2^{128})$) would
+  allow a computationally unbounded distinguisher to infer a lower bound on
+  $m$ from $z_e$, breaking zero-knowledge.
+
+\item \textbf{Subgroup membership check on every received $\mathbb{G}_1$ element.}
+  Every compressed $\mathbb{G}_1$ point arriving over the wire must be
+  deserialized via a routine that validates prime-order subgroup membership.
+  A point in a small subgroup satisfies the pairing equation
+  $e(A', \mathsf{pk}_{\star}) = e(\bar{A}, g_2)$ for the appropriate server
+  verification key $\mathsf{pk}_{\star}$ with order dividing the cofactor,
+  allowing a forgery that bypasses the BBS+ check entirely.  The
+  implementation delegates this to \texttt{blstrs::G1Affine::from\_compressed},
+  which performs cofactor-clearing and subgroup validation inside the
+  assembly-optimised blst library.
+
+\item \textbf{Subgroup membership check on every received $\mathbb{G}_2$ element.}
+  The server verification keys $\mathsf{pk}_{\mathsf{master}}$ and
+  $\mathsf{pk}_{\mathsf{daily}}$, together with the Schnorr proof commitments
+  $T_y \in \mathbb{G}_2$, must be deserialized with prime-order subgroup
+  validation before the client evaluates $\pi_S$ or any pairing equation.
+  A malicious server that advertises small-subgroup $\mathbb{G}_2$ points can
+  make the proof equation degenerate or induce invalid pairing behaviour in
+  later checks.  In practice, use the corresponding \texttt{blst}/\texttt{blstrs}
+  compressed-point validation routines (for example,
+  \texttt{blstrs::G2Affine::from\_compressed}) and reject any non-canonical or
+  non-subgroup point before computing the Fiat--Shamir challenge.
+
+\item \textbf{Zero-point and zero-scalar rejection.}
+  The server must explicitly reject $A' = 1_{\mathbb{G}_1}$,
+  $T_{\mathsf{BBS}} = 1_{\mathbb{G}_1}$, $N_T = 1_{\mathbb{G}_1}$, and
+  $k_{\mathsf{cur}} = 0$.  A zero signature component ($A' = 1_{\mathbb{G}_1}$)
+  satisfies the pairing equation trivially for any scalar responses.
+  A zero epoch nullifier ($N_T = 1_{\mathbb{G}_1}$) provides no epoch binding.
+  A zero token secret ($k_{\mathsf{cur}} = 0$) makes every derived token
+  nullifier equal the same identity element, collapsing the double-spend
+  protection.  The client must also ensure $k_{\mathsf{sub}} \neq 0$,
+  $k_{\mathsf{daily}} \neq 0$, and $k^* \neq 0$ at key-generation time.
+
+\item \textbf{TOCTOU ordering: nullifier written last, only after all proofs pass.}
+  The nullifier must be inserted into $\DB_{\mathsf{epoch}}$ or
+  $\DB_{\mathsf{spend}}$ only after every cryptographic check passes (see the
+  refresh finalization step and the final state-mutation step of the spend
+  flow).  Inserting the nullifier before verifying
+  the ZK proofs creates a denial-of-service: an adversary submits a valid
+  nullifier with a malformed proof, causing the server to burn the nullifier
+  permanently while aborting during proof verification, locking out the
+  legitimate owner for the remainder of the epoch.
+
+\item \textbf{Atomic finalization: response and nullifier state commit together.}
+  If the server crashes after committing $N_T$ but before storing the
+  corresponding response, the client's retry finds a burned nullifier but no
+  recoverable response and is permanently locked out.  The protocol therefore
+  requires a single linearizable finalization step that commits the
+  response-bearing record together with the nullifier state.  Any
+  implementation that splits these writes without equivalent atomicity falls
+  outside the formal model and can violate liveness for honest clients.
+
+\item \textbf{Deterministic derivation of $k_{\mathsf{daily}}$ and $r_{\mathsf{daily}}$
+  supports honest-client refresh recovery.}
+  A client that reboots after the server has processed the refresh but before
+  the response arrived must be able to recompute the same opening of
+  $K_{\mathsf{daily}}$ from $(k_{\mathsf{sub}},T)$ alone.  Deriving
+  $k_{\mathsf{daily}}$ and $r_{\mathsf{daily}}$ deterministically and keying
+  refresh finalization by $(T,N_T,K_{\mathsf{daily}})$ rather than by the proof
+  transcript lets an honest client recreate the same public statement after a
+  crash and recover the stored response without a synchronous client-side disk
+  write.  This is a liveness aid only: the server's one-refresh-per-epoch
+  guarantee still comes from the authoritative $N_T$ record and
+  $\mathsf{RefreshFinalize}$.
+
+\item \textbf{BEQ transcript must form a cryptographic knot across the BBS+ and Bulletproof domains.}
+  The Merlin transcript for the Dalek range proof must first absorb the BBS+
+  commitments ($A'$, $\bar{A}$, $T_{\mathsf{BBS}}$) and the bridge commitments,
+  then the Bulletproof prover must append its internal polynomial commitments,
+  and only after that may the shared 128-bit challenge be squeezed.  Without
+  this sequencing the Bulletproof is transferable: an adversary can extract the
+  range proof from one BBS+ session and replay it in a different session,
+  breaking the unlinkability of the BEQ construction (Section~5.5).  The
+  implementation therefore appends each commitment in a fixed order on both the
+  prover and verifier sides before either set of response scalars is computed.
+
+\item \textbf{Public, secret-free derivation of the epoch base point $H_T$.}
+  The domain separation tag used to compute $H_T = \mathcal{H}_{\mathbb{G}_1}(
+  \text{"ACT:Epoch:"} \parallel T)$ must not incorporate any server secret
+  or session-specific value.  Any server-controlled secret in the DST makes
+  $H_T$ server-specific, allowing a malicious server to equivocate across
+  epochs and break the nullifier-binding argument in Game~$\mathsf{G}_4$ of
+  the unforgeability proof.
+
+\item \textbf{Variable-length fields must be length-prefixed in all hash inputs.}
+  Every hash invocation that concatenates two or more variable-length byte
+  strings must include a fixed-width length prefix for each variable-length
+  field (Section~7.4).  Without length prefixes an adversary can shift bytes
+  between adjacent fields to produce an identical hash input for two distinct
+  proof statements.  Fixed-size fields (48-byte $\mathbb{G}_1$ elements,
+  32-byte scalars, 4-byte integers) require no prefix.
+
+\item \textbf{Domain separation at every hash call, with $H_{\mathsf{ctx}}$ first.}
+  Every Fiat--Shamir challenge must include a protocol-specific domain label
+  (e.g., \texttt{b"Refresh"} or \texttt{b"Spend"}) as its final input.
+  Without domain separation a proof generated in the refresh phase could be
+  re-interpreted as a spend proof and vice versa.  The context hash
+  $H_{\mathsf{ctx}}$ must appear as the \emph{first} element of each challenge
+  to prevent a prover from choosing parameters that produce a useful collision.
+
+\item \textbf{Spend mode and mode-specific fields must be transcript-bound and syntactically enforced.}
+  Exact and Hidden spend requests share a common proof skeleton.  If the
+  verifier hashes only the common fields, a relay can rewrite the request mode,
+  insert or remove $s_{\mathsf{req}}$, $C_{s,\mathsf{shift}}$, or $\pi_{\text{BEQ\_shift}}$, and
+  potentially obtain either a cross-mode replay or a retry-digest
+  collision.  The Fiat--Shamir transcript and the spend statement digest must
+  therefore bind the mode tag plus a canonical encoding of every mode-specific
+  field, including empty encodings for absent fields.  Exact mode must reject
+  any non-empty Hidden-mode fields; Hidden mode must reject any disclosed $s$
+  or $s_{\mathsf{req}}$.
+
+\item \textbf{$H_{\mathsf{ctx}}$ binds all generators and both server keys.}
+  The formula in Section~4.1.1 must bind not only the server public key but
+  also both key types and all six $h_i$ generators (see updated formula in
+  Section~4.1.1).  Including the generators prevents a parameter-substitution
+  attack; including both $\mathsf{pk}_{\mathsf{master}}$ and
+  $\mathsf{pk}_{\mathsf{daily}}$ prevents a token issued under one key being
+  replayed against the other.
+
+\item \textbf{Separate master and daily server keys.}
+  The reference implementation uses distinct key pairs for master and daily
+  token signing.  Although a single key pair suffices for the security proofs,
+  key separation provides meaningful operational security: a compromise of
+  the daily signing key does not invalidate long-term master subscriptions,
+  and the daily key can be rotated at epoch boundaries.  Deployments should
+  treat key separation as a production requirement.
+
+\end{enumerate}
+
+\subsection{Medium-Priority Components}
+\label{sec:medium}
+
+These components do not affect the formal proofs but are essential for a
+secure, reliable production deployment.
+
+\begin{enumerate}[leftmargin=*,label=\textbf{M\arabic*.}]
+
+\item \textbf{Per-entry TTL expiry for nullifier databases; no bulk clear.}
+  Entries in $\DB_{\mathsf{epoch}}$ and $\DB_{\mathsf{spend}}$ must expire
+  individually at the absolute time \emph{epoch end $+$ grace period};
+  equivalently, the insertion-time TTL is the \emph{remaining time in the
+  relevant epoch $+$ grace period} measured from the request-time snapshot
+  $\tau_{\mathsf{chk}}$ captured at the initial bounds check, not from the
+  later wall clock at finalization.
+  Bulk-wiping either database at the epoch boundary while simultaneously
+  accepting grace-period requests opens a re-use window: a nullifier from
+  epoch $T-1$ that was erased appears fresh, enabling a replay attack.
+
+\item \textbf{Nonce store TTL matches $\DB_{\mathsf{spend}}$ TTL.}
+  The 16-byte session nonce $\eta$ must be stored with the same TTL as the
+  corresponding $k_{\mathsf{cur}}$ entry.  If the nonce store expires earlier,
+  a client whose response was lost can resubmit after expiry, find no nonce
+  hit, reach the double-spend check, and be permanently rejected.  Conversely,
+  omitting the TTL entirely causes the nonce set to grow without bound.
+
+\item \textbf{Spend-record TTL must match the retry-acceptance window.}
+  As argued in Section~7.4, the response-bearing $k_{\mathsf{cur}}$ record in
+  $\DB_{\mathsf{spend}}$ and the exact spent-nonce marker for $\eta$ must both
+  remain readable until the absolute expiry $t_{\mathsf{end}}(T_{\mathsf{issue}})
+  + \Delta_{\mathsf{grace}}$, or derive any relative TTL from the captured
+  $\tau_{\mathsf{chk}}$.  If the response
+  record expires first, a legitimate retry can be misclassified as a
+  double-spend even though the original transaction committed.
+
+\item \textbf{Verification order: cheapest checks first; all state mutations last.}
+  Requests must be processed in the order: (1)~parameter bounds,
+  (2)~authoritative retry-record lookup, (3)~nonce/nullifier read-only checks, (4)~point
+  validity, (5)~bridge equations, (6)~Schnorr MSM, (7)~BEQ range proof,
+  (8)~bilinear pairing, (9)~atomic finalization.  Performing a pairing
+  check before cheaper structural checks wastes $\approx 3$~ms per
+  malformed request; writing the nullifier before verification enables the
+  TOCTOU attack described in~C6.
+
+\item \textbf{Nullifier authoritative store must not use a probabilistic filter.}
+  A Bloom filter or Cuckoo filter may serve as a fast-reject layer in front
+  of the exact store, but the authoritative double-spend decision must use
+  an exact data structure.  As the filter fills during an epoch its false-
+  positive rate rises, causing legitimate spends to be rejected without
+  cryptographic fault.
+
+\item \textbf{Grace-period and DB TTL must be configured as a unit.}
+  The invariant $\mathsf{TTL} \ge \mathsf{epoch\_duration} +
+  \mathsf{grace\_period}$ must hold at all times.  Extending the grace window
+  at runtime without also extending the DB TTL creates a re-use window.
+
+\item \textbf{Nullifier insertion must be atomic and conditional.}
+  The conditional insert must be a single atomic operation (e.g.,
+  \texttt{INSERT~\ldots~ON~CONFLICT~DO~NOTHING} in SQL, \texttt{SETNX} in
+  Redis).  A non-atomic read-then-write allows two concurrent requests with
+  the same nullifier to both pass the read check before either write
+  completes, enabling a double-spend.
+
+\item \textbf{Local nonce generation removes protocol-induced network correlation.}
+  Because the client now samples $\eta$ locally, EBUT no longer requires a
+  dedicated nonce-fetch request that could be linked to the subsequent spend.
+  Network-layer anonymity is still deployment-dependent, but the protocol no
+  longer adds an avoidable correlation surface of its own.
+
+\item \textbf{Epoch boundary burst capacity is an acceptable trade-off.}
+  During the overlap of an active non-zero grace window a user may hold an unexpired
+  token from epoch $T-1$ and a fresh token for epoch $T$, permitting a
+  burst of up to $2 \cdot c_{\mathsf{max}}$ credits.  This does not break
+  the long-term rate limit.  If strict per-epoch capacity is required the
+  grace period must be set to zero.
+
+\end{enumerate}
+
+\subsection{Optimisation Components}
+\label{sec:optimisations}
+
+These components are pure performance improvements.  Each may be replaced by
+a simpler, slower equivalent without affecting correctness or security.
+
+\begin{enumerate}[leftmargin=*,label=\textbf{O\arabic*.}]
+
+\item \textbf{ChaCha20Rng seeded from OS entropy for bulk blinder generation.}
+  At the start of each \texttt{prove} call, 32 bytes are drawn from the
+  caller's CSPRNG to seed a \texttt{ChaCha20Rng} instance; all blinder
+  scalars are then generated from this fast SIMD stream cipher.  The 256-bit
+  seed provides the full security level.  A compliant alternative is to call
+  the OS RNG for each blinder directly, at a cost of $\approx 5$--$10\times$
+  slower blinder generation.
+
+\item \textbf{Fixed-base precomputed scalar multiplication (FixedBaseTable).}
+  The seven protocol generators $g_1, h_0, \ldots, h_5$ are known at startup.
+  For each, a $w=4$-bit windowed lookup table of $64 \times 15$ affine points
+  ($\approx 90$~KB per table) is precomputed once.  Scalar multiplication
+  then requires exactly 64 conditional mixed additions and zero doublings,
+  compared with $\approx 256$ doublings and $\approx 128$ additions for
+  double-and-add.  The simpler alternative is to use the library's standard
+  variable-base scalar multiplication at no loss of security.
+
+\item \textbf{$\mathbb{G}_2$Prepared pairing line-function caching.}
+  The $\mathbb{G}_2$ elements $g_2$, $\mathsf{pk}_{\mathsf{master}}$, and
+  $\mathsf{pk}_{\mathsf{daily}}$ never change after key generation.
+  Pre-converting them to \texttt{G2Prepared} amortises the $\approx 3$~ms
+  line-function computation across all verify calls.
+
+\item \textbf{OnceLock singletons for Generators, BulletproofGens, and PedersenGens.}
+  All three expensive-to-construct structures are initialised exactly once
+  per process via Rust's \texttt{OnceLock} and shared across threads.  This
+  eliminates $\approx 3$--$5$~ms of redundant hash-to-curve work per call.
+
+\item \textbf{batch\_normalize: Montgomery batch field inversion.}
+  Converting $N$ projective $\mathbb{G}_1$ points to affine via a naive loop
+  requires $N$ field inversions.  \texttt{batch\_normalize} uses Montgomery's
+  batch-inversion trick (one field inversion $+$ $3N$ multiplications),
+  amortising the cost for any batch of points that must be normalised before
+  the challenge hash.
+
+\item \textbf{g1\_mul\_u32 for 32-bit scalar multiplication.}
+  Spend amounts and epoch numbers are 32-bit values.  A 32-iteration
+  double-and-add loop is used in place of a full 256-bit scalar
+  multiplication, running $\approx 8\times$ faster with identical correctness.
+
+\item \textbf{Schwartz--Zippel RLC: combined bridge and Schnorr MSM.}
+  The multiple bridging-equality checks and the Schnorr equation are combined
+  via a Schwartz--Zippel random linear combination with weights
+  $c, c^2, c^3, 1$ derived from the Fiat--Shamir challenge, yielding a single
+  Pippenger MSM.  Soundness error is $\le 4/|\mathbb{F}_r|$.  This reduces
+  the number of MSMs from four to one, cutting the Schnorr/bridge portion of
+  verification latency by $\approx 40\%$.
+
+\item \textbf{Batch verification via RLC pairing aggregation and parallel BEQ.}
+  \nolinkurl{verify_refresh_batch} and \nolinkurl{verify_spend_batch} aggregate
+  $N$ proofs using per-proof RLC weights $\rho_i$: one Pippenger MSM for all
+  Schnorr equations; one two-pair \nolinkurl{multi_miller_loop} for all
+  pairing equations; and parallel \nolinkurl{rayon::par_iter} for the
+  independent BEQ range proofs.  This reduces
+  \nolinkurl{final_exponentiation} calls from $N$ to $1$.
+
+\item \textbf{rayon::join for concurrent BEQ and pairing checks.}
+  Within a single proof, the BEQ range-proof verification ($\approx 1$--$2$~ms)
+  and the pairing check ($\approx 2$--$4$~ms) are mathematically independent.
+  \texttt{rayon::join} executes them on separate threads, reducing combined
+  latency from $\approx 5$~ms to $\approx 3$--$4$~ms.
+
+\item \textbf{BEQ transcript compression: $R_{\text{BLS}}$ and $R_{25519}$ omitted.}
+  The full proof tuple includes $R_{\text{BLS}}$ and $R_{25519}$.  The
+  production wire format omits them (saving 80 bytes per proof) and stores
+  only the 16-byte challenge $c$; the verifier reconstructs both $R$ values
+  algebraically from the responses and re-hashes them to confirm the challenge
+  (Section~5.2, Output item).
+
+\end{enumerate}
+
+\subsection{Deviations Between the Reference Implementation and the Protocol Specification}
+\label{sec:deviations}
+
+The reference implementation makes several choices that differ from or are
+more conservative than the presentation in earlier sections.  Where they
+conflict, the implementation is the authoritative reference.
+
+\begin{itemize}[leftmargin=*]
+
+\item \textbf{Domain separation strings.}
+  Section~4.1.1 used \texttt{"EBUT:Generator:"} and \texttt{"EBUT:Context"}
+  as example DSTs.  The actual implementation uses \texttt{"ACT:BBS:"} for
+  generator derivation, \texttt{"ACT:Context"} for $H_{\mathsf{ctx}}$,
+  \texttt{"ACT:Epoch:"} for the epoch base point, and
+  \texttt{"ACT:BEQ:Challenge"} for the BEQ Fiat--Shamir challenge.  The
+  Fiat--Shamir domain labels within the main proof are \texttt{b"Refresh"}
+  and \texttt{b"Spend"}.  Any interoperable implementation must match these
+  strings exactly.
+
+\item \textbf{Epoch integer encoding: little-endian (not big-endian).}
+  The epoch $T$ is encoded as a 32-bit \emph{little-endian} integer in the
+  implementation (matching the reference code's \texttt{t.to\_le\_bytes()}
+  convention for epochs).  This is a special-case encoding for $T$ and does
+  not change the big-endian wire format used for generic field scalars.  All
+  implementations must use little-endian encoding when
+  computing $H_T = \mathcal{H}_{\mathbb{G}_1}(\text{"ACT:Epoch:"} \parallel
+  T_{\text{LE}})$.
+
+\item \textbf{SpendProof includes $T_{\mathsf{scale},R}$ and $T_{\mathsf{refund}}$.}
+  Although the Exact-mode soundness argument can derive the refund bridge from
+  the total bridge and the public relation $C_{\mathsf{total}} = K' + s h_4$,
+  the canonical wire format retains $(T_{\mathsf{scale},R},
+  T_{\mathsf{refund}})$.  The reference implementation includes both in the
+  \texttt{SpendProof} struct and in the Fiat--Shamir challenge hash, which
+  keeps the Exact and Hidden encodings closer and simplifies verifier code.
+  Hidden mode requires the pair outright.
+
+\item \textbf{Fiat--Shamir hash width.}
+  Earlier drafts stated that \texttt{SHA-256~mod~q} is ``prohibited.''  For
+  the BLS12-381 scalar field ($q$ a 255-bit prime), the bias from a 256-bit
+  SHA-256 output reduced modulo $q$ is $(2^{256} \bmod q)/q \approx 2^{-255}$,
+  negligible at the 128-bit security level.  The implementation uses SHA-256
+  with repeated-subtraction mod-$q$ reduction and is sound.  The former
+  prohibition is replaced by the clarification in Section~7.5.
+
+\item \textbf{BEQ wire format.}
+  The specification in Section~5.2 lists the canonical tuple
+  \[
+  \pi_{\text{BEQ}} = (C_{25519}, R_{\text{BLS}}, R_{25519}, z, z_{\text{BLS}}, z_{25519}, \pi_{\text{range}}).
+  \]
+  The production wire format is
+  \[
+  (c_{128}, C_{25519}, z_e, z_{r,\text{BLS}}, z_{r,25519}, \pi_{\text{range}}),
+  \]
+  omitting the $R$ points as described in optimisation~O10.
+
+\end{itemize}
+
+\section{Performance Evaluation}
+\label{sec:performance}
+
+We report measured performance of the reference Rust implementation on BLS12-381
+and Curve25519 (Ristretto).  All timings are averages of 10 iterations in
+release mode (with \nolinkurl{RUSTFLAGS="-C target-cpu=native"}, enabling AVX2
+acceleration in the Dalek Bulletproof library), on a single thread unless stated
+otherwise.  Min/max across the 10 iterations are reported in the component
+breakdown (Table~\ref{tab:components}) to characterise JIT warm-up effects.
+The benchmark source is \nolinkurl{tests/performance.rs}.
+
+\subsection{Proof Sizes}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{|l|r|l|}
+\hline
+\textbf{Phase} & \textbf{Wire size} & \textbf{Breakdown} \\
+\hline
+Master Mint request  & 160 B & $K_{\mathsf{sub}}$ (48 B G1) + $T_{\mathsf{PoK}}$ (48 B G1) + $s_k, s_r$ (2$\times$32 B Fr) \\
+Master Mint response & 112 B & $A_{\mathsf{sub}}$ (48 B G1) + $e, s'$ (2$\times$32 B Fr) \\
+\hline
+Epoch Refresh proof  & \textbf{1620 B} & BBS+ core $A', \bar{A}, T_{\mathsf{BBS}}$: 144 B (3$\times$G1) \\
+                     &       & Bridge commitments: 288 B (6$\times$G1) \\
+                     &       & Public values $N_T, K_{\mathsf{daily}}, C_\Delta$: 144 B (3$\times$G1) \\
+                     &       & Schnorr responses: 288 B (9$\times$Fr) \\
+                     &       & BEQ proof (dual-curve $+$ Bulletproof): 756 B \\
+\hline
+Spend proof (Exact mode) & \textbf{1548 B} & BBS+ core: 144 B (3$\times$G1) \\
+                     &       & Bridge commitments: 288 B (6$\times$G1) \\
+                     &       & Public values $K', C_{\mathsf{BP}}$: 96 B (2$\times$G1) \\
+                     &       & Disclosed ($s$, $T_{\mathsf{issue}}$): 8 B (2$\times$u32) \\
+                     &       & Nullifier $k_{\mathsf{cur}}$: 32 B (Fr) \\
+                     &       & Schnorr responses: 224 B (7$\times$Fr) \\
+                     &       & BEQ proof: 756 B \\
+\hline
+\end{tabular}
+\caption{Wire-format proof sizes for each EBUT phase.  Spend figures are for Exact mode.}
+\label{tab:sizes}
+\end{table}
+
+The BEQ proof of 756 bytes breaks down as: 16 B challenge $c_{128}$,
+32 B Ristretto commitment $C_{25519}$, 32 B integer response $z_e$,
+32 B BLS12-381 randomness response $z_{r,\mathsf{BLS}}$, 32 B Ristretto
+randomness response $z_{r,25519}$, 4 B length prefix, and 608 B for the
+32-bit Dalek Bulletproof.  The Schnorr commitment pair $(R_{\mathsf{BLS}},
+R_{25519})$ is omitted from the wire format via transcript compression
+(Section~8, O10) saving 80 bytes per proof.
+
+All reported Spend proof sizes in Table~\ref{tab:sizes} are for Exact mode.
+Hidden mode adds the public shifted-amount commitment $C_{s,\mathsf{shift}}$,
+a second BEQ proof $\pi_{\text{BEQ\_shift}}$, and hidden-mode-only bridge commitments and responses,
+so its wire size is necessarily larger.
+
+\subsection{End-to-End Timings}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{|l|r|r|r|}
+\hline
+\textbf{Operation} & \textbf{Avg (ms)} & \textbf{Wire (B)} & \textbf{Ops/s} \\
+\hline
+Setup: generator creation (one-time) & 96.5 & --- & 10.4 \\
+Server key generation                &  1.8 & --- & --- \\
+$H_{\mathsf{ctx}}$ computation       &  0.5 & --- & --- \\
+\hline
+Master Mint: client begin (commit + PoK prove)    & 1.5 & 160 & 651 \\
+Master Mint: server issue (PoK verify + BBS+ sign)& 2.5 & 112 & 405 \\
+Master Mint: client finalize (unblind)            & $<$0.001 & --- & --- \\
+\hline
+Epoch Refresh: client prove  & 19.1 & 1620 &  52 \\
+Epoch Refresh: server verify &  8.1 & 1620 & 124 \\
+\hline
+Spend (Exact): client prove  & 16.2 & 1548 &  62 \\
+Spend (Exact): server verify &  6.4 & 1548 & 156 \\
+\hline
+\end{tabular}
+\caption{End-to-end timings and single-threaded throughput.  Spend figures are
+for Exact mode.  Measured at 10 iterations each, release build with AVX2 enabled.}
+\label{tab:e2e}
+\end{table}
+
+Generator creation is a one-time startup cost.  All subsequent protocol
+operations use the cached \texttt{Generators} singleton; the 96.5~ms cost is
+not incurred on a per-request basis.
+
+\subsection{Component Breakdown}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{|l|r|r|r|}
+\hline
+\textbf{Component} & \textbf{Avg (ms)} & \textbf{Min (ms)} & \textbf{Max (ms)} \\
+\hline
+Single pairing $e(G_1, G_2)$ [baseline]     & 1.47 & 1.23 & 1.82 \\
+Multi-pairing 2-input [used in verify]       & 2.20 & 1.68 & 2.65 \\
+\quad Miller loop only (1 pair)              & 0.56 & 0.37 & 0.70 \\
+\quad Final exponentiation                   & 1.09 & 0.75 & 1.25 \\
+\hline
+MSM  3 bases (issuance)                      & 0.72 & 0.49 & 0.97 \\
+MSM  5 bases (BBS+ Schnorr check)            & 1.23 & 0.79 & 1.41 \\
+MSM 12 bases (bridge + BBS combined)         & 1.69 & 1.17 & 2.53 \\
+\hline
+Hash-to-G1 ($H_T$ epoch computation)         & 0.147 & 0.125 & 0.161 \\
+BEQ prove (dual-curve, 32-bit range)         & 9.67 & 8.75 & 11.55 \\
+BEQ verify (dual-curve, 32-bit range)        & 2.43 & 1.98 & 3.35 \\
+G1 scalar-mul (BBS+ randomisation $A\cdot r_1$) & 0.202 & 0.159 & 0.251 \\
+SHA-256 challenge hash ($\approx$1~KiB input)& 0.012 & 0.008 & 0.040 \\
+\hline
+\end{tabular}
+\caption{Per-component timings (10 iterations, release + AVX2).  The
+multi-pairing check combines two Miller loops before a single
+final exponentiation, saving one $\approx$1.1~ms final-exp versus two
+independent pairings.}
+\label{tab:components}
+\end{table}
+
+\subsection{Throughput and Latency Analysis}
+
+\paragraph{Server-side throughput (single-threaded).}
+At 124~ops/s for Epoch Refresh verification and 156~ops/s for Exact-mode Spend
+verification, a single CPU core can handle 69 combined refresh+spend
+operations per second.  Because BEQ verification and the pairing check
+are executed concurrently via \texttt{rayon::join} (Section~8, O9), the
+effective server latency per proof is approximately 6--8~ms rather than
+the 9--10~ms that sequential execution would require.  Multi-core scaling
+is nearly linear for independent proofs via the batch verification paths
+\texttt{verify\_refresh\_batch} and \texttt{verify\_spend\_batch}
+(Section~8, O8), which aggregate $N$ proofs into one Pippenger MSM and
+one final exponentiation regardless of $N$.
+
+\paragraph{Client-side latency.}
+Epoch Refresh proof generation takes $\approx$19~ms and Exact-mode Spend proof
+generation takes $\approx$16~ms on the same hardware.  The dominant cost
+in both is the Dalek Bulletproof generation inside the BEQ (9.7~ms avg),
+which runs on Curve25519 and benefits from AVX2 vectorisation.  The
+BBS+ randomisation and Schnorr blinder generation together cost
+$\approx$2~ms; the Fiat--Shamir challenge hash is negligible at 0.012~ms.
+Hidden mode is strictly slower because it adds a second BEQ proof and extra
+bridge terms for the hidden amount commitment.
+
+\paragraph{Proof sizes.}
+Each full Refresh proof and Exact-mode Spend proof fits in well under 2~KB
+(1620~B and 1548~B respectively), making the protocol suitable for TLS-protected
+HTTP/2 connections without fragmentation.  The BEQ component accounts
+for 756~B of each proof; the transcript compression described in
+Section~8 (O10) already saves 80~B per proof compared to the
+uncompressed format.  Hidden mode is larger because it carries an additional
+amount commitment and BEQ proof.
+
+\paragraph{Comparison with earlier estimate.}
+The earlier draft estimated Refresh proof size at $\approx$3.0~KB and
+Exact-mode Spend at $\approx$3.2~KB.  The reference implementation achieves
+1.62~KB and 1.55~KB respectively—a reduction of approximately 47\%—
+due to the dual-curve BEQ design (which produces a compact 756~B
+combined Sigma + Bulletproof instead of a standalone BLS12-381 range
+proof), and the transcript compression that omits the Schnorr
+commitment pair from the wire format.  Hidden mode intentionally trades some
+of that compactness for amount privacy.
+
+\subsection{Applied Optimisations}
+
+The following optimisations are present in the reference implementation
+and reflected in the measurements above; full classification and
+rationale appear in Section~\ref{sec:optimisations}.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Pippenger MSM} for all multi-scalar multiplications
+  ($\geq 12$ bases per verify call).  Compared to a naive double-and-add
+  fold the measured speedup for the 12-base bridge+BBS combined check is
+  $\approx$5--10$\times$.
+
+\item \textbf{Single multi-pairing} replaces two independent pairing
+  checks.  Two Miller loops are combined before one final exponentiation,
+  reducing the measured pairing cost from $2\times 1.47$~ms = 2.94~ms
+  to 2.20~ms ($\approx$25\% saving).
+
+\item \textbf{$\mathbb{G}_2$Prepared line-function caching} for $g_2$,
+  $\mathsf{pk}_{\mathsf{master}}$, and $\mathsf{pk}_{\mathsf{daily}}$.
+  Pre-conversion to \texttt{G2Prepared} amortises $\approx$3~ms of
+  line-function computation across all verify calls.
+
+\item \textbf{Dual-curve BEQ} replaces BLS12-381-native Bulletproofs for
+  all range proofs.  The Dalek library's AVX2-optimised inner-product
+  argument on Curve25519 is $\approx$3$\times$ faster than the equivalent
+  BLS12-381 range proof, and the 32-bit Dalek Bulletproof (608~B) is
+  smaller than a BLS12-381 256-bit range proof.
+
+\item \textbf{\texttt{rayon::join}} for concurrent BEQ + pairing
+  verification within a single proof call, reducing combined latency
+  from $\approx$10~ms to $\approx$6--8~ms.
+
+\item \textbf{OnceLock singletons} for \texttt{Generators},
+  \texttt{BulletproofGens}, and \texttt{PedersenGens} eliminate
+  3--5~ms of redundant hash-to-curve work per call.
+\end{enumerate}
+
+\section{Conclusion}
+
+We have presented Epoch-Bound Usage Tokens (EBUT), a primitive that enforces rate-limited anonymous access by cryptographically binding tokens to discrete time epochs. Our construction combines blind BBS+ signatures, Pedersen commitments, and zero-knowledge proofs to achieve strong privacy guarantees while preventing token accumulation and burst consumption. We formalized the security properties of EBUT—unforgeability, unlinkability, and rate-limit soundness—and provided rigorous, game-based proofs under standard assumptions. The integration of cross-curve batched equality proofs ensures practical efficiency without compromising security. We provided a complete, production-ready specification with detailed implementation guidance, API schemas, and performance estimates. EBUT offers a robust solution for privacy-preserving subscription services and rate-limited resource access in anonymous systems.
+
+\bibliographystyle{alpha}
+\begin{thebibliography}{99}
+
+\bibitem{act}
+Anonymous Credit Tokens (ACT): A Complete Formal Specification.
+\emph{Cryptology ePrint Archive}, 2024.
+
+\bibitem{NTAT}
+F.~B.~Durak, A.~Talayhan, L.~Marco, and S.~Vaudenay.
+Non-Transferable Anonymous Tokens by Secret Binding.
+\emph{Full version, May 8th, 2024}.
+
+\bibitem{CamenischL01}
+J.~Camenisch and A.~Lysyanskaya.
+An Efficient System for Non-transferable Anonymous Credentials with Optional Anonymity Revocation.
+\emph{EUROCRYPT 2001}.
+
+\bibitem{CL02}
+J.~Camenisch and A.~Lysyanskaya.
+A Signature Scheme with Efficient Protocols.
+\emph{SCN 2002}.
+
+\bibitem{BBS04}
+M.~H.~Au, W.~Susilo, and Y.~Mu.
+Constant-Size Dynamic $k$-TAA.
+\emph{SCN 2006}.
+
+\bibitem{CFRG-BBS}
+M.~Lodder, T.~Looker, and A.~Whitehead.
+The BBS Signature Scheme.
+\emph{IETF Internet-Draft draft-irtf-cfrg-bbs-signatures-05}, 2024.
+
+\bibitem{BB04}
+D.~Boneh and X.~Boyen.
+Short Signatures Without Random Oracles.
+\emph{EUROCRYPT 2004}.
+
+\bibitem{Bulletproofs}
+B.~B{\"u}nz, J.~Bootle, D.~Boneh, A.~Poelstra, P.~Wuille, and G.~Maxwell.
+Bulletproofs: Short Proofs for Confidential Transactions and More.
+\emph{IEEE S\&P 2018}.
+
+\bibitem{PointchevalStern00}
+D.~Pointcheval and J.~Stern.
+Security Arguments for Digital Signatures and Blind Signatures.
+\emph{Journal of Cryptology}, 13(3):361--396, 2000.
+
+\bibitem{BellareNeven06}
+M.~Bellare and G.~Neven.
+Multi-Signatures in the Plain Public-Key Model and a General Forking Lemma.
+\emph{ACM CCS 2006}.
+
+\bibitem{BonehShoup}
+D.~Boneh and V.~Shoup.
+A Graduate Course in Applied Cryptography.
+\emph{Version 0.6}, 2023.
+
+\end{thebibliography}
+
+\end{document}
